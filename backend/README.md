@@ -17,7 +17,16 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
 pip install -e .
-uvicorn agent_studio_backend.api:app --host 127.0.0.1 --port 37123 --reload
+python -m uvicorn agent_studio_backend.api:app --host 127.0.0.1 --port 37123 --reload
+```
+
+If you hit `ModuleNotFoundError: No module named 'agent_studio_backend'`, it usually means
+`uvicorn` is running under a *different* Python (common with `pyenv`/`conda` shims). Sanity check:
+
+```bash
+which python
+python --version
+python -c "import agent_studio_backend; print('import_ok')"
 ```
 
 Health check:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Annotated
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
@@ -9,7 +8,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     db_path: str = Field(default="./agent_studio.sqlite", alias="AGENT_STUDIO_DB_PATH")
-    allow_cors_origins: str = Field(default="", alias="AGENT_STUDIO_ALLOW_CORS_ORIGINS")
+    allow_cors_origins: str = Field(default="http://localhost:1420", alias="AGENT_STUDIO_ALLOW_CORS_ORIGINS")
     log_level: str = Field(default="info", alias="AGENT_STUDIO_LOG_LEVEL")
 
     def cors_origins_list(self) -> list[str]:
@@ -22,7 +21,4 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-
-
-SettingsDep = Annotated[Settings, Field(default_factory=get_settings)]
 
