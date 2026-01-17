@@ -39,6 +39,17 @@ def validate_graph(doc: AgentGraphDocV1) -> list[ValidationIssue]:
                 )
             )
 
+    connected_ids = {e.source for e in doc.edges} | {e.target for e in doc.edges}
+    for node in doc.nodes:
+        if node.id not in connected_ids:
+            issues.append(
+                ValidationIssue(
+                    code="node.disconnected",
+                    message="Node is not connected to any edge.",
+                    node_id=node.id,
+                )
+            )
+
     llm_nodes = [n for n in doc.nodes if isinstance(n, LLMNode)]
     if not llm_nodes:
         issues.append(ValidationIssue(code="graph.no_llm", message="Graph must include at least one LLM node."))

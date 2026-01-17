@@ -77,6 +77,29 @@ function buildEnvelope(graph: AgentGraphDocV1): AgentSpecEnvelope {
   };
 }
 
+function formatRelativeTime(isoTime: string): string {
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+  const date = new Date(isoTime);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  const diffMs = date.getTime() - Date.now();
+  const diffSeconds = Math.round(diffMs / 1000);
+  const thresholds: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 60 * 60 * 24 * 365],
+    ["month", 60 * 60 * 24 * 30],
+    ["week", 60 * 60 * 24 * 7],
+    ["day", 60 * 60 * 24],
+    ["hour", 60 * 60],
+    ["minute", 60],
+    ["second", 1],
+  ];
+  for (const [unit, secondsInUnit] of thresholds) {
+    if (Math.abs(diffSeconds) >= secondsInUnit || unit === "second") {
+      return rtf.format(-Math.round(diffSeconds / secondsInUnit), unit);
+    }
+  }
+  return rtf.format(0, "second");
+}
+
 function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, ValidationIssue[]>): Node[] {
   return graph.nodes.map((n) => ({
     id: n.id,
@@ -277,7 +300,7 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
   const [busy, setBusy] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [jsonModal, setJsonModal] = useState<null | { mode: "export" | "import"; text: string; error?: string }>(null);
+  const [jsonModal, setJsonModal] = useState<null | { text: string }>(null);
 
   const flowRef = useRef<ReactFlowInstance | null>(null);
 
@@ -292,12 +315,36 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
     return m;
   }, [issues]);
 
-  const flowNodes = useMemo(() => toFlowNodes(graph, issuesByNodeId), [graph, issuesByNodeId]);
-  const flowEdges = useMemo(() => toFlowEdges(graph), [graph]);
+  const [flowNodes, setFlowNodes] = useState<Node[]>(() => toFlowNodes(graph, issuesByNodeId));
+  const [flowEdges, setFlowEdges] = useState<Edge[]>(() => toFlowEdges(graph));
+  const flowNodesRef = useRef(flowNodes);
+  const flowEdgesRef = useRef(flowEdges);
+
+  useEffect(() => {
+    flowNodesRef.current = flowNodes;
+  }, [flowNodes]);
+
+  useEffect(() => {
+    flowEdgesRef.current = flowEdges;
+  }, [flowEdges]);
 
   useEffect(() => {
     saveAgentDraft(graph);
   }, [graph]);
+
+  useEffect(() => {
+    const nextNodes = toFlowNodes(graph, issuesByNodeId);
+    const nextEdges = toFlowEdges(graph);
+    setFlowNodes((prev) => {
+      const prevById = new Map(prev.map((n) => [n.id, n]));
+      return nextNodes.map((node) => {
+        const existing = prevById.get(node.id);
+        if (!existing) return node;
+        return { ...existing, position: node.position, data: node.data, type: node.type };
+      });
+    });
+    setFlowEdges(nextEdges);
+  }, [graph, issuesByNodeId]);
 
   const refreshRevisions = useCallback(async () => {
     try {
@@ -312,29 +359,37 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
     refreshRevisions();
   }, [refreshRevisions]);
 
-  const onNodesChange: OnNodesChange = useCallback(
-    (changes) => {
-      const next = applyNodeChanges(changes, flowNodes);
-      setGraph((g) => mergeFlow(g, next, flowEdges));
-    },
-    [flowNodes, flowEdges],
-  );
+  const onNodesChange: OnNodesChange = useCallback((changes) => {
+    setFlowNodes((prev) => {
+      const next = applyNodeChanges(changes, prev);
+      const shouldPersist = changes.some(
+        (change) => change.type === "position" || change.type === "remove" || change.type === "add",
+      );
+      if (shouldPersist) {
+        setGraph((g) => mergeFlow(g, next, flowEdgesRef.current));
+      }
+      return next;
+    });
+  }, []);
 
-  const onEdgesChange: OnEdgesChange = useCallback(
-    (changes) => {
-      const next = applyEdgeChanges(changes, flowEdges);
-      setGraph((g) => mergeFlow(g, flowNodes, next));
-    },
-    [flowNodes, flowEdges],
-  );
+  const onEdgesChange: OnEdgesChange = useCallback((changes) => {
+    setFlowEdges((prev) => {
+      const next = applyEdgeChanges(changes, prev);
+      const shouldPersist = changes.some((change) => change.type === "add" || change.type === "remove");
+      if (shouldPersist) {
+        setGraph((g) => mergeFlow(g, flowNodesRef.current, next));
+      }
+      return next;
+    });
+  }, []);
 
-  const onConnect = useCallback(
-    (params: Connection) => {
-      const nextEdges = addEdge(params, flowEdges);
-      setGraph((g) => mergeFlow(g, flowNodes, nextEdges));
-    },
-    [flowNodes, flowEdges],
-  );
+  const onConnect = useCallback((params: Connection) => {
+    setFlowEdges((prev) => {
+      const nextEdges = addEdge(params, prev);
+      setGraph((g) => mergeFlow(g, flowNodesRef.current, nextEdges));
+      return nextEdges;
+    });
+  }, []);
 
   const selectedNode = useMemo(
     () => graph.nodes.find((n) => n.id === selectedNodeId) ?? null,
@@ -390,27 +445,19 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [graphState, saveRevision, selectedNodeId, selectedEdgeId, setGraph]);
 
-  async function validate() {
-    setBusy(true);
-    try {
-      const res = await api(props.backend).validateSpec({ spec: buildEnvelope(graph) });
-      setIssues(res.issues);
-      setErr(res.ok ? null : "Spec has validation issues.");
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function saveRevision() {
+    setBusy(true);
     const req: AgentRevisionCreateRequest = {
       name: name.trim() || "Visual agent",
       author: author.trim() || null,
       spec_json: buildEnvelope(graph),
     };
-    setBusy(true);
     try {
+      const validation = await api(props.backend).validateSpec({ spec: buildEnvelope(graph) });
+      setIssues(validation.issues);
+      if (!validation.ok || validation.issues.length > 0) {
+        return;
+      }
       const res = await api(props.backend).createAgentRevision(req);
       setErr(null);
       setIssues(null);
@@ -424,35 +471,7 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
   }
 
   function openExportJson() {
-    setJsonModal({ mode: "export", text: prettyJson(graph) });
-  }
-
-  function openImportJson() {
-    setJsonModal({ mode: "import", text: prettyJson(graph) });
-  }
-
-  function applyImportJson(text: string) {
-    try {
-      const parsed = JSON.parse(text) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        setJsonModal((m) => (m ? { ...m, error: "Expected a graph JSON object." } : m));
-        return;
-      }
-      const g = parsed as Partial<AgentGraphDocV1>;
-      if (g.schema_version !== "graph-v1" || !Array.isArray(g.nodes) || !Array.isArray(g.edges)) {
-        setJsonModal((m) => (m ? { ...m, error: "Expected an AgentGraphDocV1 (schema_version: graph-v1)." } : m));
-        return;
-      }
-      setGraph(g as AgentGraphDocV1);
-      graphState.clearHistory();
-      setIssues(null);
-      setErr(null);
-      setSelectedNodeId(null);
-      setSelectedEdgeId(null);
-      setJsonModal(null);
-    } catch (e) {
-      setJsonModal((m) => (m ? { ...m, error: e instanceof Error ? e.message : String(e) } : m));
-    }
+    setJsonModal({ text: prettyJson(graph) });
   }
 
   function addNode(type: AgentNode["type"]) {
@@ -470,9 +489,9 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
     }));
   }
 
-  function loadRevision() {
-    if (!selectedRevId || !revs) return;
-    const rev = revs.find((r) => r.id === selectedRevId);
+  function loadRevision(revId: string) {
+    if (!revId || !revs) return;
+    const rev = revs.find((r) => r.id === revId);
     if (!rev) return;
     const spec = rev.spec_json as AgentSpecEnvelope;
     if (!spec || spec.schema_version !== "graph-v1" || !spec.graph) {
@@ -494,43 +513,13 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
           <div className="asCardHeader">
             <div className="asCardTitle">Agent editor</div>
             <div className="asCardRight">
-              <button className="asBtn" onClick={validate} disabled={busy}>
-                Validate
-              </button>
               <button className="asBtn primary" onClick={saveRevision} disabled={busy}>
                 Save revision
               </button>
             </div>
           </div>
           <div className="asCardBody">
-            {err ? <div className="asError">{err}</div> : null}
-            <div className="asRow">
-              <button className="asBtn" onClick={graphState.undo} disabled={!graphState.canUndo}>
-                Undo
-              </button>
-              <button className="asBtn" onClick={graphState.redo} disabled={!graphState.canRedo}>
-                Redo
-              </button>
-              <button className="asBtn" onClick={openExportJson}>
-                Export JSON
-              </button>
-              <button className="asBtn" onClick={openImportJson}>
-                Import JSON
-              </button>
-              <button
-                className="asBtn danger"
-                onClick={() => {
-                  setGraph(DEFAULT_GRAPH);
-                  graphState.clearHistory();
-                  setIssues(null);
-                  setErr(null);
-                  setSelectedNodeId(null);
-                  setSelectedEdgeId(null);
-                }}
-              >
-                Reset
-              </button>
-            </div>
+            <div className="asRow" />
             <div className="asFormGrid">
               <label className="asField">
                 <div className="asFieldLabel">Name</div>
@@ -541,41 +530,7 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
                 <input className="asInput" value={author} onChange={(e) => setAuthor(e.currentTarget.value)} />
               </label>
             </div>
-            <div className="asRow">
-              <select className="asSelect" value={selectedRevId} onChange={(e) => setSelectedRevId(e.currentTarget.value)}>
-                <option value="">Load from revision…</option>
-                {(revs ?? []).map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name} · {r.id.slice(0, 8)}
-                  </option>
-                ))}
-              </select>
-              <button className="asBtn" onClick={loadRevision}>
-                Load
-              </button>
-            </div>
-            {issues && issues.length > 0 ? (
-              <div className="asIssueList">
-                {issues.map((issue, idx) => (
-                  <button
-                    key={`${issue.code}-${idx}`}
-                    className="asIssueItem asIssueButton"
-                    onClick={() => {
-                      if (!issue.node_id) return;
-                      setSelectedNodeId(issue.node_id);
-                      setSelectedEdgeId(null);
-                      const inst = flowRef.current;
-                      const n = inst?.getNode(issue.node_id);
-                      if (inst && n) {
-                        inst.fitView({ nodes: [n], padding: 0.45, duration: 220 });
-                      }
-                    }}
-                  >
-                    <span className="asMono">{issue.code}</span> {issue.message}
-                  </button>
-                ))}
-              </div>
-            ) : null}
+            <div className="asRow" />
           </div>
         </div>
 
@@ -661,38 +616,31 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
       <div className="asEditorCanvas">
         <div className="asCanvasToolbar">
           <div className="asRow">
-            <button
-              className="asBtn sm"
-              onClick={() => {
-                void flowRef.current?.fitView({ padding: 0.28, duration: 220 });
+            <button className="asBtn sm" onClick={graphState.undo} disabled={!graphState.canUndo}>
+              Undo
+            </button>
+            <button className="asBtn sm" onClick={graphState.redo} disabled={!graphState.canRedo}>
+              Redo
+            </button>
+            <button className="asBtn sm" onClick={openExportJson}>
+              Export JSON
+            </button>
+            <select
+              className="asSelect asSelectInline asSelectUnderline"
+              value={selectedRevId}
+              onChange={(e) => {
+                const next = e.currentTarget.value;
+                setSelectedRevId(next);
+                loadRevision(next);
               }}
             >
-              Fit
-            </button>
-            <button
-              className="asBtn sm"
-              onClick={() => {
-                void flowRef.current?.zoomIn({ duration: 120 });
-              }}
-            >
-              Zoom +
-            </button>
-            <button
-              className="asBtn sm"
-              onClick={() => {
-                void flowRef.current?.zoomOut({ duration: 120 });
-              }}
-            >
-              Zoom -
-            </button>
-          </div>
-          <div className="asRow">
-            <button className="asBtn sm" onClick={validate} disabled={busy}>
-              Validate
-            </button>
-            <button className="asBtn sm primary" onClick={saveRevision} disabled={busy}>
-              Save
-            </button>
+              <option value="">Load a previous revision...</option>
+              {(revs ?? []).map((r) => (
+                <option key={r.id} value={r.id}>
+                  {formatRelativeTime(r.created_at)} · {r.id.slice(0, 8)}
+                </option>
+              ))}
+            </select>
             <div className="asCanvasMeta">
               <span className="asMono">{graph.nodes.length}</span> nodes ·{" "}
               <span className="asMono">{graph.edges.length}</span> edges ·{" "}
@@ -700,6 +648,31 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
             </div>
           </div>
         </div>
+        {err || (issues && issues.length > 0) ? (
+          <div className="asCanvasToolbar asCanvasToolbarSecondary">
+            {issues && issues.length > 0
+              ? issues.map((issue, idx) => (
+                  <button
+                    key={`${issue.code}-${idx}`}
+                    className="asIssueItem asIssueButton asCanvasErrorText"
+                    onClick={() => {
+                      if (!issue.node_id) return;
+                      setSelectedNodeId(issue.node_id);
+                      setSelectedEdgeId(null);
+                      const inst = flowRef.current;
+                      const n = inst?.getNode(issue.node_id);
+                      if (inst && n) {
+                        inst.fitView({ nodes: [n], padding: 0.45, duration: 220 });
+                      }
+                    }}
+                  >
+                    <span className="asCanvasErrorSep"> • </span>
+                    <span className="asMono">{issue.code}</span> {issue.message}
+                  </button>
+                ))
+              : null}
+          </div>
+        ) : null}
         <ReactFlow
           nodes={flowNodes}
           edges={flowEdges}
@@ -735,34 +708,27 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
         >
           <div className="asModal">
             <div className="asModalHeader">
-              <div className="asModalTitle">{jsonModal.mode === "export" ? "Export graph JSON" : "Import graph JSON"}</div>
+              <div className="asModalTitle">Export graph JSON</div>
               <button className="asBtn" onClick={() => setJsonModal(null)}>
                 Close
               </button>
             </div>
             <div className="asModalBody">
-              {jsonModal.error ? <div className="asError">{jsonModal.error}</div> : null}
               <textarea
                 className="asTextarea"
                 rows={18}
                 value={jsonModal.text}
-                onChange={(e) => setJsonModal((m) => (m ? { ...m, text: e.currentTarget.value, error: undefined } : m))}
+                onChange={(e) => setJsonModal((m) => (m ? { ...m, text: e.currentTarget.value } : m))}
               />
               <div className="asRow">
-                {jsonModal.mode === "export" ? (
-                  <button
-                    className="asBtn primary"
-                    onClick={async () => {
-                      await navigator.clipboard.writeText(jsonModal.text);
-                    }}
-                  >
-                    Copy
-                  </button>
-                ) : (
-                  <button className="asBtn primary" onClick={() => applyImportJson(jsonModal.text)}>
-                    Import
-                  </button>
-                )}
+                <button
+                  className="asBtn primary"
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(jsonModal.text);
+                  }}
+                >
+                  Copy
+                </button>
               </div>
             </div>
           </div>
