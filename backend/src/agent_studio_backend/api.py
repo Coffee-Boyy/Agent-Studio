@@ -19,9 +19,9 @@ from agent_studio_backend.schemas import (
     RunCreateRequest,
     RunEventResponse,
     RunResponse,
-  SpecCompileResponse,
-  SpecValidateRequest,
-  SpecValidateResponse,
+    SpecCompileResponse,
+    SpecValidateRequest,
+    SpecValidateResponse,
 )
 from agent_studio_backend.services.compiler import compile_to_spec, validate_graph
 from agent_studio_backend.services.event_bus import EVENT_BUS
@@ -112,6 +112,7 @@ async def create_run(req: RunCreateRequest) -> RunResponse:
             session_factory=lambda: Session(ENGINE),
             spec_json=spec_json,
             inputs_json=req.inputs_json,
+            llm_connection=req.llm_connection.model_dump() if req.llm_connection else None,
         )
 
     asyncio.create_task(_bg())

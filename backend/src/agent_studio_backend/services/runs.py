@@ -118,7 +118,15 @@ class RunService:
         session.add(run)
         session.commit()
 
-    async def execute_run(self, *, run_id: str, session_factory, spec_json: dict[str, Any], inputs_json: dict[str, Any]):
+    async def execute_run(
+        self,
+        *,
+        run_id: str,
+        session_factory,
+        spec_json: dict[str, Any],
+        inputs_json: dict[str, Any],
+        llm_connection: Optional[dict[str, Any]] = None,
+    ):
         """
         Background execution entrypoint.
         `session_factory` should return a fresh sqlmodel.Session (thread-safe).
@@ -136,7 +144,12 @@ class RunService:
                 await self.emit_event(session, run_id=run_id, type=type, payload_json=payload)
 
         try:
-            output = await self._executor.run(spec_json=spec_json, inputs_json=inputs_json, emit_event=emit)
+            output = await self._executor.run(
+                spec_json=spec_json,
+                inputs_json=inputs_json,
+                llm_connection=llm_connection,
+                emit_event=emit,
+            )
             with session_factory() as session:
                 await self._set_run_status(session, run_id=run_id, status="completed", ended_at=now_utc(), final_output=output)
         except CancelledError as e:

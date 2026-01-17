@@ -21,7 +21,16 @@ import "@xyflow/react/dist/style.css";
 
 import { api, type BackendConfig } from "../lib/api";
 import { prettyJson, tryParseJsonObject } from "../lib/json";
-import { loadAgentDraft, saveAgentDraft } from "../lib/storage";
+import {
+  buildLlmConnectionPayload,
+  DEFAULT_LLM_PROVIDER,
+  isLlmProvider,
+  LLM_PROVIDERS,
+  LLM_PROVIDER_LABELS,
+  MODEL_OPTIONS,
+  type LlmProvider,
+} from "../lib/llm";
+import { loadAgentDraft, saveAgentDraft, type AppSettings } from "../lib/storage";
 import type {
   AgentGraphDocV1,
   AgentNode,
@@ -49,7 +58,7 @@ const DEFAULT_GRAPH: AgentGraphDocV1 = {
       name: "Main LLM",
       position: { x: 320, y: 80 },
       system_prompt: "You are a helpful agent.",
-      model: { provider: "openai", name: "gpt-4o-mini" },
+      model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
       tools: [],
       temperature: 0.3,
     },
@@ -157,7 +166,7 @@ function newNode(type: AgentNode["type"], idx: number): AgentNode {
       name: "LLM",
       position,
       system_prompt: "",
-      model: { provider: "openai", name: "gpt-4o-mini" },
+      model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
       tools: [],
       temperature: 0.2,
     };
@@ -183,7 +192,7 @@ function newNode(type: AgentNode["type"], idx: number): AgentNode {
     return { id, type, name: "Handoff", position, target_agent_id: "" };
   }
   if (type === "subagent") {
-    return { id, type, name: "Subagent", position, agent_name: "Subagent", system_prompt: "" };
+    return { id, type, name: "Subagent", position, agent_name: "Subagent", agent_revision_id: "", system_prompt: "" };
   }
   if (type === "output") {
     return { id, type, name: "Output", position };
@@ -262,13 +271,13 @@ function useUndoRedoState<T>(initial: () => T): UndoRedoState<T> {
   };
 }
 
-function AgentFlowNode(props: { data: { label: string; nodeType: string; name: string; issueCount: number } }) {
-  const { data } = props;
+function AgentFlowNode(props: { data: { label: string; nodeType: string; name: string; issueCount: number }; selected?: boolean }) {
+  const { data, selected } = props;
   const isSourceOnly = data.nodeType === "input";
   const isTargetOnly = data.nodeType === "output";
 
   return (
-    <div className={`asFlowNode type-${data.nodeType}`}>
+    <div className={`asFlowNode type-${data.nodeType}${selected ? " isSelected" : ""}`}>
       {!isSourceOnly ? <Handle className="nodrag" type="target" position={Position.Left} /> : null}
       {!isTargetOnly ? <Handle className="nodrag" type="source" position={Position.Right} /> : null}
       <div className="asFlowNodeTitle">
@@ -280,7 +289,7 @@ function AgentFlowNode(props: { data: { label: string; nodeType: string; name: s
   );
 }
 
-export function AgentEditorPage(props: { backend: BackendConfig }) {
+export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSettings }) {
   const graphState = useUndoRedoState<AgentGraphDocV1>(() => {
     const draft = loadAgentDraft();
     if (draft && draft.schema_version === "graph-v1") {
@@ -294,13 +303,27 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
   const [revs, setRevs] = useState<AgentRevisionResponse[] | null>(null);
   const [selectedRevId, setSelectedRevId] = useState<string>("");
   const [name, setName] = useState("Visual agent");
-  const [author, setAuthor] = useState("local");
   const [issues, setIssues] = useState<ValidationIssue[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [jsonModal, setJsonModal] = useState<null | { text: string }>(null);
+  const [testInputText, setTestInputText] = useState('{"input": ""}');
+  const [testOutput, setTestOutput] = useState("");
+  const [testStatus, setTestStatus] = useState("");
+  const [testRunId, setTestRunId] = useState("");
+  const [testErr, setTestErr] = useState<string | null>(null);
+  const [testBusy, setTestBusy] = useState(false);
+  const [contextMenu, setContextMenu] = useState<
+    | null
+    | {
+        kind: "node" | "edge";
+        id: string;
+        x: number;
+        y: number;
+      }
+  >(null);
 
   const flowRef = useRef<ReactFlowInstance | null>(null);
 
@@ -449,7 +472,6 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
     setBusy(true);
     const req: AgentRevisionCreateRequest = {
       name: name.trim() || "Visual agent",
-      author: author.trim() || null,
       spec_json: buildEnvelope(graph),
     };
     try {
@@ -474,6 +496,72 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
     setJsonModal({ text: prettyJson(graph) });
   }
 
+  async function runTest() {
+    if (!selectedRevId) {
+      setTestErr("Save and select a revision before testing.");
+      return;
+    }
+    const parsed = tryParseJsonObject(testInputText);
+    if (!parsed.ok) {
+      setTestErr("Inputs JSON must be a valid JSON object.");
+      return;
+    }
+    setTestErr(null);
+    setTestOutput("");
+    setTestStatus("starting");
+    setTestRunId("");
+    setTestBusy(true);
+    try {
+      const llmConnection = buildLlmConnectionPayload(
+        props.settings.llmProvider,
+        props.settings.llmConnections[props.settings.llmProvider],
+      );
+      const res = await api(props.backend).createRun({
+        agent_revision_id: selectedRevId,
+        inputs_json: parsed.value,
+        tags_json: {},
+        group_id: null,
+        llm_connection: llmConnection,
+      });
+      setTestRunId(res.id);
+      setTestStatus(res.status);
+      let latest = res;
+      while (latest && !latest.ended_at && !["completed", "failed", "cancelled"].includes(latest.status)) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        latest = await api(props.backend).getRun(res.id);
+        setTestStatus(latest.status);
+        if (typeof latest.final_output === "string") {
+          setTestOutput(latest.final_output);
+        }
+        if (latest.error) {
+          setTestErr(latest.error);
+        }
+      }
+      if (latest) {
+        if (typeof latest.final_output === "string") {
+          setTestOutput(latest.final_output);
+        }
+        if (latest.error) {
+          setTestErr(latest.error);
+        }
+      }
+    } catch (e) {
+      setTestErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTestBusy(false);
+    }
+  }
+
+  async function cancelTestRun() {
+    if (!testRunId) return;
+    try {
+      await api(props.backend).cancelRun(testRunId);
+      setTestStatus("cancelled");
+    } catch (e) {
+      setTestErr(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   function addNode(type: AgentNode["type"]) {
     setGraph((g) => ({ ...g, nodes: [...g.nodes, newNode(type, g.nodes.length)] }));
   }
@@ -487,6 +575,27 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
       ...g,
       edges: g.edges.map((e) => (e.id === edgeId ? { ...e, label } : e)),
     }));
+  }
+
+  function deleteNode(nodeId: string) {
+    setGraph((g) => ({
+      ...g,
+      nodes: g.nodes.filter((n) => n.id !== nodeId),
+      edges: g.edges.filter((ed) => ed.source !== nodeId && ed.target !== nodeId),
+    }));
+    if (selectedNodeId === nodeId) {
+      setSelectedNodeId(null);
+    }
+  }
+
+  function deleteEdge(edgeId: string) {
+    setGraph((g) => ({
+      ...g,
+      edges: g.edges.filter((ed) => ed.id !== edgeId),
+    }));
+    if (selectedEdgeId === edgeId) {
+      setSelectedEdgeId(null);
+    }
   }
 
   function loadRevision(revId: string) {
@@ -512,57 +621,17 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
         <div className="asCard">
           <div className="asCardHeader">
             <div className="asCardTitle">Agent editor</div>
-            <div className="asCardRight">
-              <button className="asBtn primary" onClick={saveRevision} disabled={busy}>
-                Save revision
-              </button>
-            </div>
           </div>
           <div className="asCardBody">
-            <div className="asRow" />
-            <div className="asFormGrid">
-              <label className="asField">
-                <div className="asFieldLabel">Name</div>
-                <input className="asInput" value={name} onChange={(e) => setName(e.currentTarget.value)} />
-              </label>
-              <label className="asField">
-                <div className="asFieldLabel">Author</div>
-                <input className="asInput" value={author} onChange={(e) => setAuthor(e.currentTarget.value)} />
-              </label>
+            <label className="asField">
+              <div className="asFieldLabel">Name</div>
+              <input className="asInput" value={name} onChange={(e) => setName(e.currentTarget.value)} />
+            </label>
+            <div className="asRow">
+              <button className="asBtn primary" onClick={saveRevision} disabled={busy}>
+                Save
+              </button>
             </div>
-            <div className="asRow" />
-          </div>
-        </div>
-
-        <div className="asCard">
-          <div className="asCardHeader">
-            <div className="asCardTitle">Palette</div>
-          </div>
-          <div className="asCardBody asRow">
-            <button className="asBtn" onClick={() => addNode("input")}>
-              + Input
-            </button>
-            <button className="asBtn" onClick={() => addNode("llm")}>
-              + LLM
-            </button>
-            <button className="asBtn" onClick={() => addNode("tool")}>
-              + Tool
-            </button>
-            <button className="asBtn" onClick={() => addNode("guardrail")}>
-              + Guardrail
-            </button>
-            <button className="asBtn" onClick={() => addNode("router")}>
-              + Router
-            </button>
-            <button className="asBtn" onClick={() => addNode("handoff")}>
-              + Handoff
-            </button>
-            <button className="asBtn" onClick={() => addNode("subagent")}>
-              + Subagent
-            </button>
-            <button className="asBtn" onClick={() => addNode("output")}>
-              + Output
-            </button>
           </div>
         </div>
 
@@ -577,6 +646,10 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
                 graph={graph}
                 issues={issuesByNodeId.get(selectedNode.id) ?? []}
                 onChange={updateNode}
+                onDelete={deleteNode}
+                revisions={revs}
+                currentAgentName={name}
+                settings={props.settings}
               />
             ) : selectedEdge ? (
               <div className="asStack">
@@ -613,90 +686,191 @@ export function AgentEditorPage(props: { backend: BackendConfig }) {
         </div>
       </div>
 
-      <div className="asEditorCanvas">
-        <div className="asCanvasToolbar">
-          <div className="asRow">
-            <button className="asBtn sm" onClick={graphState.undo} disabled={!graphState.canUndo}>
-              Undo
+      <div className="asEditorRight">
+        <div className="asCard">
+          <div className="asCardHeader">
+            <div className="asCardTitle">Palette</div>
+          </div>
+          <div className="asCardBody asRow">
+            <button className="asBtn asPaletteBtn type-input" onClick={() => addNode("input")}>
+              + Input
             </button>
-            <button className="asBtn sm" onClick={graphState.redo} disabled={!graphState.canRedo}>
-              Redo
+            <button className="asBtn asPaletteBtn type-llm" onClick={() => addNode("llm")}>
+              + LLM
             </button>
-            <button className="asBtn sm" onClick={openExportJson}>
-              Export JSON
+            <button className="asBtn asPaletteBtn type-tool" onClick={() => addNode("tool")}>
+              + Tool
             </button>
-            <select
-              className="asSelect asSelectInline asSelectUnderline"
-              value={selectedRevId}
-              onChange={(e) => {
-                const next = e.currentTarget.value;
-                setSelectedRevId(next);
-                loadRevision(next);
-              }}
-            >
-              <option value="">Load a previous revision...</option>
-              {(revs ?? []).map((r) => (
-                <option key={r.id} value={r.id}>
-                  {formatRelativeTime(r.created_at)} · {r.id.slice(0, 8)}
-                </option>
-              ))}
-            </select>
-            <div className="asCanvasMeta">
-              <span className="asMono">{graph.nodes.length}</span> nodes ·{" "}
-              <span className="asMono">{graph.edges.length}</span> edges ·{" "}
-              <span className="asMono">{issues?.length ?? 0}</span> issues
-            </div>
+            <button className="asBtn asPaletteBtn type-guardrail" onClick={() => addNode("guardrail")}>
+              + Guardrail
+            </button>
+            <button className="asBtn asPaletteBtn type-router" onClick={() => addNode("router")}>
+              + Router
+            </button>
+            <button className="asBtn asPaletteBtn type-handoff" onClick={() => addNode("handoff")}>
+              + Handoff
+            </button>
+            <button className="asBtn asPaletteBtn type-subagent" onClick={() => addNode("subagent")}>
+              + Subagent
+            </button>
+            <button className="asBtn asPaletteBtn type-output" onClick={() => addNode("output")}>
+              + Output
+            </button>
           </div>
         </div>
-        {err || (issues && issues.length > 0) ? (
-          <div className="asCanvasToolbar asCanvasToolbarSecondary">
-            {issues && issues.length > 0
-              ? issues.map((issue, idx) => (
-                  <button
-                    key={`${issue.code}-${idx}`}
-                    className="asIssueItem asIssueButton asCanvasErrorText"
-                    onClick={() => {
-                      if (!issue.node_id) return;
-                      setSelectedNodeId(issue.node_id);
-                      setSelectedEdgeId(null);
-                      const inst = flowRef.current;
-                      const n = inst?.getNode(issue.node_id);
-                      if (inst && n) {
-                        inst.fitView({ nodes: [n], padding: 0.45, duration: 220 });
-                      }
-                    }}
-                  >
-                    <span className="asCanvasErrorSep"> • </span>
-                    <span className="asMono">{issue.code}</span> {issue.message}
-                  </button>
-                ))
-              : null}
+        <div className="asEditorCanvas">
+          <div className="asCanvasToolbar">
+            <div className="asRow">
+              <button className="asBtn sm" onClick={graphState.undo} disabled={!graphState.canUndo}>
+                Undo
+              </button>
+              <button className="asBtn sm" onClick={graphState.redo} disabled={!graphState.canRedo}>
+                Redo
+              </button>
+              <button className="asBtn sm" onClick={openExportJson}>
+                Export JSON
+              </button>
+              <select
+                className="asSelect asSelectInline asSelectUnderline"
+                value={selectedRevId}
+                onChange={(e) => {
+                  const next = e.currentTarget.value;
+                  setSelectedRevId(next);
+                  loadRevision(next);
+                }}
+              >
+                <option value="">Load a previous revision...</option>
+                {(revs ?? []).map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {formatRelativeTime(r.created_at)} · {r.id.slice(0, 8)}
+                  </option>
+                ))}
+              </select>
+              <div className="asCanvasMeta">
+                <span className="asMono">{graph.nodes.length}</span> nodes ·{" "}
+                <span className="asMono">{graph.edges.length}</span> edges ·{" "}
+                <span className="asMono">{issues?.length ?? 0}</span> issues
+              </div>
+            </div>
           </div>
-        ) : null}
-        <ReactFlow
-          nodes={flowNodes}
-          edges={flowEdges}
-          onInit={(inst) => {
-            flowRef.current = inst;
-          }}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          nodeTypes={nodeTypes}
-          onNodeClick={(_, node) => {
-            setSelectedNodeId(node.id);
-            setSelectedEdgeId(null);
-          }}
-          onEdgeClick={(_, edge) => {
-            setSelectedEdgeId(edge.id);
-            setSelectedNodeId(null);
-          }}
-          fitView
-        >
-          <Background />
-          <Controls />
-          <MiniMap />
-        </ReactFlow>
+          {err || (issues && issues.length > 0) ? (
+            <div className="asCanvasToolbar asCanvasToolbarSecondary">
+              {issues && issues.length > 0
+                ? issues.map((issue, idx) => (
+                    <button
+                      key={`${issue.code}-${idx}`}
+                      className="asIssueItem asIssueButton asCanvasErrorText"
+                      onClick={() => {
+                        if (!issue.node_id) return;
+                        setSelectedNodeId(issue.node_id);
+                        setSelectedEdgeId(null);
+                        const inst = flowRef.current;
+                        const n = inst?.getNode(issue.node_id);
+                        if (inst && n) {
+                          inst.fitView({ nodes: [n], padding: 0.45, duration: 220 });
+                        }
+                      }}
+                    >
+                      <span className="asCanvasErrorSep"> • </span>
+                      <span className="asMono">{issue.code}</span> {issue.message}
+                    </button>
+                  ))
+                : null}
+            </div>
+          ) : null}
+          <ReactFlow
+            nodes={flowNodes}
+            edges={flowEdges}
+            onInit={(inst) => {
+              flowRef.current = inst;
+            }}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            nodeTypes={nodeTypes}
+            onNodeClick={(_, node) => {
+              setSelectedNodeId(node.id);
+              setSelectedEdgeId(null);
+            }}
+            onEdgeClick={(_, edge) => {
+              setSelectedEdgeId(edge.id);
+              setSelectedNodeId(null);
+            }}
+            onNodeContextMenu={(event, node) => {
+              event.preventDefault();
+              setContextMenu({ kind: "node", id: node.id, x: event.clientX, y: event.clientY });
+            }}
+            onEdgeContextMenu={(event, edge) => {
+              event.preventDefault();
+              setContextMenu({ kind: "edge", id: edge.id, x: event.clientX, y: event.clientY });
+            }}
+            onPaneClick={() => {
+              setContextMenu(null);
+              setSelectedNodeId(null);
+              setSelectedEdgeId(null);
+            }}
+            fitView
+          >
+            <Background />
+            <Controls />
+            <MiniMap />
+          </ReactFlow>
+          {contextMenu ? (
+            <div
+              className="asContextMenu"
+              style={{ left: contextMenu.x, top: contextMenu.y }}
+              onClick={() => setContextMenu(null)}
+            >
+              {contextMenu.kind === "node" ? (
+                <button className="asBtn sm danger" onClick={() => deleteNode(contextMenu.id)}>
+                  Delete node
+                </button>
+              ) : (
+                <button className="asBtn sm danger" onClick={() => deleteEdge(contextMenu.id)}>
+                  Delete edge
+                </button>
+              )}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="asEditorFooter">
+        <div className="asCard">
+          <div className="asCardHeader">
+            <div className="asCardTitle">Test agent</div>
+          </div>
+          <div className="asCardBody asStack">
+            <label className="asField">
+              <div className="asFieldLabel">Inputs JSON</div>
+              <textarea
+                className="asTextarea"
+                rows={5}
+                value={testInputText}
+                onChange={(e) => setTestInputText(e.currentTarget.value)}
+              />
+            </label>
+            <div className="asRow">
+              <button className="asBtn primary" onClick={runTest} disabled={testBusy || !selectedRevId}>
+                {testBusy ? "Running..." : "Run test"}
+              </button>
+              <button
+                className="asBtn"
+                onClick={cancelTestRun}
+                disabled={!testRunId || !["queued", "running", "starting"].includes(testStatus)}
+              >
+                Cancel
+              </button>
+              {testStatus ? <div className="asMuted">Status: {testStatus}</div> : null}
+              {testRunId ? <div className="asMuted">Run ID: {testRunId.slice(0, 8)}</div> : null}
+            </div>
+            {testErr ? <div className="asIssueItem asCanvasErrorText">{testErr}</div> : null}
+            <label className="asField">
+              <div className="asFieldLabel">Final output</div>
+              <textarea className="asTextarea" rows={6} value={testOutput} readOnly />
+            </label>
+          </div>
+        </div>
       </div>
 
       {jsonModal ? (
@@ -743,23 +917,88 @@ function NodeInspector(props: {
   graph: AgentGraphDocV1;
   issues: ValidationIssue[];
   onChange: (node: AgentNode) => void;
+  onDelete: (nodeId: string) => void;
+  revisions: AgentRevisionResponse[] | null;
+  currentAgentName: string;
+  settings: AppSettings;
 }) {
-  const { node, graph, issues, onChange } = props;
-  const [modelText, setModelText] = useState(() => (node.type === "llm" ? prettyJson(node.model ?? {}) : "{}"));
+  const { node, graph, issues, onChange, onDelete, revisions, currentAgentName, settings } = props;
   const [schemaText, setSchemaText] = useState(() =>
     node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
   );
 
   useEffect(() => {
-    if (node.type === "llm") {
-      setModelText(prettyJson(node.model ?? {}));
-    }
     if (node.type === "tool") {
       setSchemaText(prettyJson(node.schema ?? {}));
     }
   }, [node]);
 
   const toolOptions = useMemo(() => graph.nodes.filter((n): n is ToolNode => n.type === "tool"), [graph.nodes]);
+  const revisionsByAgent = useMemo(() => {
+    const map = new Map<string, AgentRevisionResponse[]>();
+    for (const rev of revisions ?? []) {
+      if (rev.name === currentAgentName) continue;
+      const list = map.get(rev.name) ?? [];
+      list.push(rev);
+      map.set(rev.name, list);
+    }
+    for (const [key, list] of map.entries()) {
+      list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      map.set(key, list);
+    }
+    return map;
+  }, [revisions, currentAgentName]);
+  const agentNames = useMemo(() => Array.from(revisionsByAgent.keys()).sort(), [revisionsByAgent]);
+  const selectedAgentRevisions =
+    node.type === "subagent" && node.agent_name ? revisionsByAgent.get(node.agent_name) ?? [] : [];
+
+  const modelProvider = useMemo<LlmProvider>(() => {
+    if (node.type !== "llm") return settings.llmProvider;
+    const model = node.model ?? {};
+    if (typeof model !== "object" || Array.isArray(model) || !model) return settings.llmProvider;
+    const provider = (model as { provider?: unknown }).provider;
+    return isLlmProvider(provider) ? provider : settings.llmProvider;
+  }, [node, settings.llmProvider]);
+
+  const modelName = useMemo(() => {
+    if (node.type !== "llm") return "";
+    const model = node.model ?? {};
+    if (typeof model !== "object" || Array.isArray(model) || !model) return "";
+    return typeof (model as { name?: unknown }).name === "string" ? ((model as { name?: string }).name ?? "") : "";
+  }, [node]);
+
+  const modelOptions = useMemo(() => {
+    const base = MODEL_OPTIONS[modelProvider] ?? [];
+    const next = [...base];
+    const preferredModel = settings.llmConnections[modelProvider]?.model?.trim() ?? "";
+    for (const candidate of [preferredModel, modelName]) {
+      if (candidate && !next.includes(candidate)) {
+        next.unshift(candidate);
+      }
+    }
+    return next;
+  }, [modelProvider, modelName, settings.llmConnections]);
+
+  function updateLlmModel(nextProvider: LlmProvider, nextName: string) {
+    if (node.type !== "llm") return;
+    const nextModel = {
+      ...(node.model as Record<string, unknown> | undefined),
+      provider: nextProvider,
+      name: nextName,
+    };
+    updateLLM({ model: nextModel });
+  }
+
+  useEffect(() => {
+    if (node.type !== "subagent") return;
+    if (!node.agent_name) return;
+    const list = revisionsByAgent.get(node.agent_name) ?? [];
+    if (list.length === 0) return;
+    const hasSelected = node.agent_revision_id && list.some((rev) => rev.id === node.agent_revision_id);
+    if (!hasSelected) {
+      onChange({ ...node, agent_revision_id: list[0].id });
+    }
+  }, [node, onChange, revisionsByAgent]);
 
   function updateLLM(next: Partial<LLMNode>) {
     if (node.type !== "llm") return;
@@ -794,17 +1033,39 @@ function NodeInspector(props: {
             <textarea className="asTextarea" rows={6} value={node.system_prompt ?? ""} onChange={(e) => updateLLM({ system_prompt: e.currentTarget.value })} />
           </label>
           <label className="asField">
-            <div className="asFieldLabel">Model JSON</div>
-            <textarea
-              className="asTextarea"
-              rows={5}
-              value={modelText}
-              onChange={(e) => setModelText(e.currentTarget.value)}
-              onBlur={() => {
-                const parsed = tryParseJsonObject(modelText);
-                if (parsed.ok) updateLLM({ model: parsed.value });
+            <div className="asFieldLabel">Provider</div>
+            <select
+              className="asSelect"
+              value={modelProvider}
+              onChange={(e) => {
+                const nextProvider = e.currentTarget.value as LlmProvider;
+                const nextName = (MODEL_OPTIONS[nextProvider]?.[0] ?? modelName ?? "").trim();
+                updateLlmModel(nextProvider, nextName);
               }}
-            />
+            >
+              {LLM_PROVIDERS.map((provider) => (
+                <option key={provider} value={provider}>
+                  {LLM_PROVIDER_LABELS[provider]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Model</div>
+            <select
+              className="asSelect"
+              value={modelName || modelOptions[0] || ""}
+              onChange={(e) => {
+                const nextName = e.currentTarget.value;
+                updateLlmModel(modelProvider, nextName);
+              }}
+            >
+              {modelOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="asField">
             <div className="asFieldLabel">Tools</div>
@@ -888,7 +1149,43 @@ function NodeInspector(props: {
         <>
           <label className="asField">
             <div className="asFieldLabel">Agent name</div>
-            <input className="asInput" value={node.agent_name} onChange={(e) => onChange({ ...node, agent_name: e.currentTarget.value })} />
+            <select
+              className="asSelect"
+              value={node.agent_name}
+              onChange={(e) => {
+                const nextAgent = e.currentTarget.value;
+                const nextRevs = revisionsByAgent.get(nextAgent) ?? [];
+                onChange({ ...node, agent_name: nextAgent, agent_revision_id: nextRevs[0]?.id ?? "" });
+              }}
+            >
+              <option value="">Select agent…</option>
+              {node.agent_name &&
+              node.agent_name !== currentAgentName &&
+              !(revisions ?? []).some((rev) => rev.name === node.agent_name) ? (
+                <option value={node.agent_name}>{node.agent_name}</option>
+              ) : null}
+              {agentNames.map((agent) => (
+                <option key={agent} value={agent}>
+                  {agent}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Agent version</div>
+            <select
+              className="asSelect"
+              value={node.agent_revision_id ?? ""}
+              onChange={(e) => onChange({ ...node, agent_revision_id: e.currentTarget.value })}
+              disabled={!node.agent_name || selectedAgentRevisions.length === 0}
+            >
+              <option value="">Latest revision</option>
+              {selectedAgentRevisions.map((rev) => (
+                <option key={rev.id} value={rev.id}>
+                  {formatRelativeTime(rev.created_at)} · {rev.id.slice(0, 8)}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="asField">
             <div className="asFieldLabel">System prompt</div>
@@ -896,6 +1193,12 @@ function NodeInspector(props: {
           </label>
         </>
       ) : null}
+
+      <div className="asRow">
+        <button className="asBtn danger" onClick={() => onDelete(node.id)}>
+          Delete node
+        </button>
+      </div>
     </div>
   );
 }

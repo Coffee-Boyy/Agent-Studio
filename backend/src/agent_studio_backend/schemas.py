@@ -30,11 +30,20 @@ class AgentRevisionResponse(BaseModel):
     spec_json: dict[str, Any]
 
 
+class LlmConnection(BaseModel):
+    provider: str
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    organization: Optional[str] = None
+    project: Optional[str] = None
+
+
 class RunCreateRequest(BaseModel):
     agent_revision_id: str
     inputs_json: dict[str, Any] = Field(default_factory=dict)
     tags_json: dict[str, Any] = Field(default_factory=dict)
     group_id: Optional[str] = None
+    llm_connection: Optional[LlmConnection] = None
 
 
 class RunResponse(BaseModel):

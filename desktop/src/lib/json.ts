@@ -19,7 +19,9 @@ export function tryParseJsonObject(text: string): { ok: true; value: Record<stri
 }
 
 export function formatDateTime(iso: string): string {
-  const d = new Date(iso);
+  const hasTimezone = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso);
+  const normalized = hasTimezone ? iso : `${iso}Z`;
+  const d = new Date(normalized);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }

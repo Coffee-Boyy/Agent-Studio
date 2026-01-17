@@ -1,56 +1,34 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 from typing import Any, Protocol
+from agents import Agent, Runner
 
 from agent_studio_backend.agent_spec import AgentSpecEnvelope
+from agent_studio_backend.llm_providers import build_run_config
 from agent_studio_backend.services.compiler import compile_to_spec, validate_graph
 
 
 class Executor(Protocol):
-    async def run(self, *, spec_json: dict[str, Any], inputs_json: dict[str, Any], emit_event): ...
-
-
-class MockExecutor:
-    """
-    Default executor for the MVP so the UI can be built without API keys.
-    Emits a few lifecycle + "span-ish" events, then returns a final output string.
-    """
-
-    async def run(self, *, spec_json: dict[str, Any], inputs_json: dict[str, Any], emit_event):
-        await emit_event("run.started", {"inputs": inputs_json, "spec_summary": {"name": spec_json.get("name")}})
-        await asyncio.sleep(0.05)
-
-        await emit_event("span.started", {"span_type": "llm", "name": "mock.generate"})
-        await asyncio.sleep(0.15)
-        await emit_event("span.completed", {"span_type": "llm", "name": "mock.generate", "tokens": 42})
-
-        await emit_event("span.started", {"span_type": "tool", "name": "mock.tool_call"})
-        await asyncio.sleep(0.10)
-        await emit_event(
-            "span.completed",
-            {"span_type": "tool", "name": "mock.tool_call", "tool_result": {"ok": True}},
-        )
-
-        await asyncio.sleep(0.05)
-        output = f"mock_output: processed keys={sorted(list(inputs_json.keys()))}"
-        await emit_event("run.completed", {"final_output_preview": output[:200]})
-        return output
+    async def run(
+        self,
+        *,
+        spec_json: dict[str, Any],
+        inputs_json: dict[str, Any],
+        llm_connection: dict[str, Any] | None,
+        emit_event,
+    ): ...
 
 
 class AgentsSdkExecutor:
-    def __init__(self) -> None:
-        try:
-            from agents import Agent, Runner  # type: ignore
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(
-                "openai-agents not installed. Install backend with extras: pip install -e '.[agents]'."
-            ) from exc
-        self._Agent = Agent
-        self._Runner = Runner
-
-    async def run(self, *, spec_json: dict[str, Any], inputs_json: dict[str, Any], emit_event):
+    async def run(
+        self,
+        *,
+        spec_json: dict[str, Any],
+        inputs_json: dict[str, Any],
+        llm_connection: dict[str, Any] | None,
+        emit_event,
+    ):
         envelope = AgentSpecEnvelope.model_validate(spec_json)
         issues = validate_graph(envelope.graph)
         if issues:
@@ -64,8 +42,7 @@ class AgentsSdkExecutor:
             {"inputs": inputs_json, "spec_summary": {"name": agent_cfg.get("name")}},
         )
 
-        Agent = self._Agent
-        Runner = self._Runner
+        model_label = _extract_model_name(agent_cfg.get("model"))
 
         agent_kwargs = {}
         sig = inspect.signature(Agent)
@@ -75,8 +52,8 @@ class AgentsSdkExecutor:
             agent_kwargs["instructions"] = agent_cfg.get("system_prompt", "")
         elif "system_prompt" in sig.parameters:
             agent_kwargs["system_prompt"] = agent_cfg.get("system_prompt", "")
-        if "model" in sig.parameters:
-            agent_kwargs["model"] = agent_cfg.get("model", {}).get("name") or agent_cfg.get("model")
+        if "model" in sig.parameters and model_label:
+            agent_kwargs["model"] = model_label
         if "tools" in sig.parameters:
             agent_kwargs["tools"] = []
 
@@ -92,18 +69,24 @@ class AgentsSdkExecutor:
             runner_kwargs["input"] = input_value
         elif "messages" in run_sig.parameters:
             runner_kwargs["messages"] = input_value
+        if "starting_agent" in run_sig.parameters:
+            runner_kwargs["starting_agent"] = agent
         if "agent" in run_sig.parameters:
             runner_kwargs["agent"] = agent
         if "trace_processor" in run_sig.parameters:
             runner_kwargs["trace_processor"] = RunEventTraceProcessor(emit_event)
         elif "tracing_processor" in run_sig.parameters:
             runner_kwargs["tracing_processor"] = RunEventTraceProcessor(emit_event)
+        if "run_config" in run_sig.parameters:
+            run_config = build_run_config(llm_connection)
+            if run_config is not None:
+                runner_kwargs["run_config"] = run_config
 
-        await emit_event("span.started", {"span_type": "llm", "name": agent_cfg.get("model")})
+        await emit_event("span.started", {"span_type": "llm", "name": model_label})
         result = await Runner.run(**runner_kwargs)
-        await emit_event("span.completed", {"span_type": "llm", "name": agent_cfg.get("model")})
+        await emit_event("span.completed", {"span_type": "llm", "name": model_label})
 
-        output = getattr(result, "output", None) if result is not None else None
+        output = result.final_output if result is not None else None
         if output is None:
             output = str(result)
 
@@ -122,12 +105,14 @@ class RunEventTraceProcessor:
         await self._emit_event("span.completed", {"span_type": "sdk", "name": getattr(span, "name", None)})
 
 
-def _load_default_executor() -> Executor:
-    try:
-        return AgentsSdkExecutor()
-    except Exception:
-        return MockExecutor()
+def _extract_model_name(model_cfg: Any) -> str | None:
+    if isinstance(model_cfg, dict):
+        name = model_cfg.get("name")
+        return name if isinstance(name, str) else None
+    if isinstance(model_cfg, str):
+        return model_cfg
+    return None
 
 
-DEFAULT_EXECUTOR: Executor = _load_default_executor()
+DEFAULT_EXECUTOR: Executor = AgentsSdkExecutor()
 

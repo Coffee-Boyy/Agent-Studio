@@ -4,22 +4,30 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRevisionResponse,
   AgentSpecEnvelope,
-  AgentNode,
   HealthResponse,
+  LLMNode,
+  LlmConnection,
   RunCreateRequest,
   RunEventResponse,
   RunResponse,
 } from "./lib/types";
 import { api, type BackendConfig } from "./lib/api";
-import { diffLines } from "./lib/diff";
+import {
+  buildLlmConnectionPayload,
+  isLlmProvider,
+  LLM_PROVIDER_DEFS,
+  LLM_PROVIDERS,
+  LLM_PROVIDER_LABELS,
+  type LlmProvider,
+} from "./lib/llm";
 import { loadSettings, saveSettings, type AppSettings } from "./lib/storage";
 import { formatDateTime, formatDurationMs, prettyJson, tryParseJsonObject } from "./lib/json";
 import { AgentEditorPage } from "./pages/AgentEditorPage";
 
-type Route = "revisions" | "editor" | "run" | "trace" | "dashboard" | "settings";
+type Route = "editor" | "runner" | "dashboard" | "settings";
 
 function App() {
-  const [route, setRoute] = useState<Route>("revisions");
+  const [route, setRoute] = useState<Route>("editor");
   const [settings, setSettings] = useState(() => loadSettings());
   const backend: BackendConfig = useMemo(() => ({ baseUrl: settings.backendBaseUrl }), [settings.backendBaseUrl]);
 
@@ -74,11 +82,9 @@ function App() {
         </div>
 
         <nav className="asNav">
-          <NavItem active={route === "revisions"} onClick={() => setRoute("revisions")} label="Prompt revisions" />
-          <NavItem active={route === "editor"} onClick={() => setRoute("editor")} label="Agent editor" />
-          <NavItem active={route === "run"} onClick={() => setRoute("run")} label="Run launcher" />
-          <NavItem active={route === "trace"} onClick={() => setRoute("trace")} label="Live trace" />
           <NavItem active={route === "dashboard"} onClick={() => setRoute("dashboard")} label="Dashboard" />
+          <NavItem active={route === "runner"} onClick={() => setRoute("runner")} label="Agent runner" />
+          <NavItem active={route === "editor"} onClick={() => setRoute("editor")} label="Agent editor" />
           <NavItem active={route === "settings"} onClick={() => setRoute("settings")} label="Settings" />
         </nav>
 
@@ -107,12 +113,14 @@ function App() {
           </Banner>
         ) : null}
 
-        {route === "revisions" ? <RevisionsPage backend={backend} onStartRun={(runId) => setRecentRunIds((s) => uniq([runId, ...s]))} /> : null}
-        {route === "editor" ? <AgentEditorPage backend={backend} /> : null}
-        {route === "run" ? (
-          <RunLauncherPage backend={backend} recentRunIds={recentRunIds} setRecentRunIds={setRecentRunIds} />
+        {route === "editor" ? <AgentEditorPage backend={backend} settings={settings} /> : null}
+        {route === "runner" ? (
+          <AgentRunnerPage
+            backend={backend}
+            settings={settings}
+            onStartRun={(runId) => setRecentRunIds((s) => uniq([runId, ...s]).slice(0, 50))}
+          />
         ) : null}
-        {route === "trace" ? <LiveTracePage backend={backend} recentRunIds={recentRunIds} /> : null}
         {route === "dashboard" ? <DashboardPage backend={backend} recentRunIds={recentRunIds} /> : null}
         {route === "settings" ? <SettingsPage settings={settings} setSettings={setSettings} /> : null}
       </main>
@@ -179,35 +187,22 @@ function Button(props: {
   );
 }
 
-function RevisionsPage(props: { backend: BackendConfig; onStartRun: (runId: string) => void }) {
+function AgentRunnerPage(props: { backend: BackendConfig; settings: AppSettings; onStartRun: (runId: string) => void }) {
   const [revs, setRevs] = useState<AgentRevisionResponse[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [compareId, setCompareId] = useState<string | null>(null);
-
-  const [createName, setCreateName] = useState("Example agent");
-  const [createAuthor, setCreateAuthor] = useState("local");
-  const [createSpecText, setCreateSpecText] = useState(
-    prettyJson({
-      name: "Example agent",
-      system_prompt: "You are a helpful agent.",
-      model: { provider: "mock", name: "mock.generate" },
-      tools: [],
-      guardrails: [],
-      handoffs: [],
-    }),
-  );
-  const [createBusy, setCreateBusy] = useState(false);
-
-  const selected = useMemo(() => revs?.find((r) => r.id === selectedId) ?? null, [revs, selectedId]);
-  const compare = useMemo(() => revs?.find((r) => r.id === compareId) ?? null, [revs, compareId]);
+  const [selectedAgent, setSelectedAgent] = useState("");
+  const [selectedRevisionId, setSelectedRevisionId] = useState("");
+  const [runInputsText, setRunInputsText] = useState(prettyJson({ input: "hello" }));
+  const [runTagsText, setRunTagsText] = useState(prettyJson({}));
+  const [runGroupId, setRunGroupId] = useState("");
+  const [runBusy, setRunBusy] = useState(false);
+  const [runCreated, setRunCreated] = useState<RunResponse | null>(null);
 
   async function refresh() {
     try {
       setErr(null);
       const list = await api(props.backend).listAgentRevisions();
       setRevs(list);
-      if (!selectedId && list.length) setSelectedId(list[0]!.id);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
       setRevs(null);
@@ -219,33 +214,72 @@ function RevisionsPage(props: { backend: BackendConfig; onStartRun: (runId: stri
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.backend.baseUrl]);
 
-  async function createRevision() {
-    const spec = tryParseJsonObject(createSpecText);
-    if (!spec.ok) {
-      setErr(`Spec JSON invalid: ${spec.error}`);
-      return;
-    }
-    setCreateBusy(true);
-    try {
-      const rev = await api(props.backend).createAgentRevision({ name: createName, author: createAuthor || null, spec_json: spec.value });
-      setErr(null);
-      await refresh();
-      setSelectedId(rev.id);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setCreateBusy(false);
-    }
+  function resolveProvider(revision: AgentRevisionResponse): LlmProvider | null {
+    const spec = revision.spec_json as AgentSpecEnvelope;
+    if (!spec || spec.schema_version !== "graph-v1" || !spec.graph) return null;
+    const llmNode = spec.graph.nodes.find((node) => node.type === "llm") as LLMNode | undefined;
+    if (!llmNode) return null;
+    const model = llmNode.model ?? {};
+    if (typeof model !== "object" || Array.isArray(model) || !model) return null;
+    const provider = (model as { provider?: unknown }).provider;
+    return isLlmProvider(provider) ? provider : null;
   }
 
-  const [runInputsText, setRunInputsText] = useState(prettyJson({ input: "hello" }));
-  const [runTagsText, setRunTagsText] = useState(prettyJson({}));
-  const [runGroupId, setRunGroupId] = useState("");
-  const [runBusy, setRunBusy] = useState(false);
-  const [runCreated, setRunCreated] = useState<RunResponse | null>(null);
+  function buildLlmConnection(provider: LlmProvider): LlmConnection {
+    return buildLlmConnectionPayload(provider, props.settings.llmConnections[provider]) as LlmConnection;
+  }
+
+  const agents = useMemo(() => {
+    if (!revs) return [];
+    const byName = new Map<string, AgentRevisionResponse[]>();
+    for (const rev of revs) {
+      const name = rev.name || "Untitled agent";
+      const existing = byName.get(name) ?? [];
+      existing.push(rev);
+      byName.set(name, existing);
+    }
+    const sortedAgents = Array.from(byName.entries()).map(([name, revisions]) => {
+      const sorted = [...revisions].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+      return { name, revisions: sorted };
+    });
+    sortedAgents.sort((a, b) => {
+      const aTime = a.revisions[0] ? Date.parse(a.revisions[0].created_at) : 0;
+      const bTime = b.revisions[0] ? Date.parse(b.revisions[0].created_at) : 0;
+      return bTime - aTime;
+    });
+    return sortedAgents;
+  }, [revs]);
+
+  const selectedRevisions = useMemo(() => {
+    return agents.find((agent) => agent.name === selectedAgent)?.revisions ?? [];
+  }, [agents, selectedAgent]);
+
+  const selectedRevision = useMemo(() => {
+    return selectedRevisions.find((rev) => rev.id === selectedRevisionId) ?? selectedRevisions[0] ?? null;
+  }, [selectedRevisions, selectedRevisionId]);
+
+  useEffect(() => {
+    if (!agents.length) return;
+    const activeAgent = agents.find((agent) => agent.name === selectedAgent) ?? agents[0];
+    if (!activeAgent) return;
+    if (activeAgent.name !== selectedAgent) {
+      setSelectedAgent(activeAgent.name);
+    }
+    const latestId = activeAgent.revisions[0]?.id ?? "";
+    if (!latestId) return;
+    if (!selectedRevisionId || !activeAgent.revisions.some((rev) => rev.id === selectedRevisionId)) {
+      setSelectedRevisionId(latestId);
+    }
+  }, [agents, selectedAgent, selectedRevisionId]);
+
+  function handleAgentChange(nextAgent: string) {
+    setSelectedAgent(nextAgent);
+    const revisions = agents.find((agent) => agent.name === nextAgent)?.revisions ?? [];
+    setSelectedRevisionId(revisions[0]?.id ?? "");
+  }
 
   async function startRun() {
-    if (!selected) return;
+    if (!selectedRevision) return;
     const inputs = tryParseJsonObject(runInputsText);
     const tags = tryParseJsonObject(runTagsText);
     if (!inputs.ok) {
@@ -256,11 +290,13 @@ function RevisionsPage(props: { backend: BackendConfig; onStartRun: (runId: stri
       setErr(`Tags JSON invalid: ${tags.error}`);
       return;
     }
+    const provider = resolveProvider(selectedRevision) ?? props.settings.llmProvider;
     const req: RunCreateRequest = {
-      agent_revision_id: selected.id,
+      agent_revision_id: selectedRevision.id,
       inputs_json: inputs.value,
       tags_json: tags.value,
       group_id: runGroupId.trim() || null,
+      llm_connection: buildLlmConnection(provider),
     };
     setRunBusy(true);
     try {
@@ -275,405 +311,92 @@ function RevisionsPage(props: { backend: BackendConfig; onStartRun: (runId: stri
     }
   }
 
-  const diffText = useMemo(() => {
-    if (!selected || !compare) return null;
-    const a = prettyJson(compare.spec_json).split("\n");
-    const b = prettyJson(selected.spec_json).split("\n");
-    return diffLines(a, b);
-  }, [selected, compare]);
-
-  const semanticDiff = useMemo(() => {
-    if (!selected || !compare) return null;
-    if (!isGraphEnvelope(selected.spec_json) || !isGraphEnvelope(compare.spec_json)) return null;
-    return diffGraph(compare.spec_json, selected.spec_json);
-  }, [selected, compare]);
-
   return (
     <div className="asGrid2">
       <div className="asCol">
-        <Card
-          title="Prompt revisions"
-          right={
-            <Button tone="neutral" onClick={refresh}>
-              Refresh
-            </Button>
-          }
-        >
+        <Card title="Agent runner">
           {err ? <div className="asError">{err}</div> : null}
           {revs ? (
-            <div className="asList">
-              {revs.map((r) => (
-                <button
-                  key={r.id}
-                  className={`asListItem ${selectedId === r.id ? "active" : ""}`}
-                  type="button"
-                  onClick={() => setSelectedId(r.id)}
-                >
-                  <div className="asListTitle">{r.name}</div>
-                  <div className="asListMeta">
-                    <span className="asMono">{r.id.slice(0, 8)}</span> · {formatDateTime(r.created_at)} · {r.author ?? "unknown"}
-                  </div>
-                </button>
-              ))}
-              {revs.length === 0 ? <div className="asMuted">No revisions yet. Create one below.</div> : null}
-            </div>
+            agents.length ? (
+              <div className="asStack">
+                <Field label="Agent">
+                  <select className="asSelect" value={selectedAgent} onChange={(e) => handleAgentChange(e.currentTarget.value)}>
+                    {agents.map((agent) => (
+                      <option key={agent.name} value={agent.name}>
+                        {agent.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Version">
+                  <select className="asSelect" value={selectedRevisionId} onChange={(e) => setSelectedRevisionId(e.currentTarget.value)}>
+                    {selectedRevisions.map((rev, idx) => (
+                      <option key={rev.id} value={rev.id}>
+                        {idx === 0 ? "Latest" : "Version"} · {formatDateTime(rev.created_at)} · {rev.id.slice(0, 8)}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Inputs JSON">
+                  <textarea className="asTextarea" value={runInputsText} onChange={(e) => setRunInputsText(e.currentTarget.value)} rows={6} />
+                </Field>
+                <Field label="Tags JSON">
+                  <textarea className="asTextarea" value={runTagsText} onChange={(e) => setRunTagsText(e.currentTarget.value)} rows={4} />
+                </Field>
+                <Field label="Group ID (optional)">
+                  <input className="asInput" value={runGroupId} onChange={(e) => setRunGroupId(e.currentTarget.value)} />
+                </Field>
+                <div className="asRow">
+                  <Button tone="primary" onClick={startRun} disabled={runBusy || !selectedRevision}>
+                    {runBusy ? "Starting…" : "Run agent"}
+                  </Button>
+                  {runCreated ? <span className="asMono asSmall">run_id: {runCreated.id}</span> : null}
+                </div>
+              </div>
+            ) : (
+              <div className="asMuted">No agents yet. Create a revision to get started.</div>
+            )
           ) : (
             <div className="asMuted">Loading…</div>
           )}
         </Card>
-
-        <Card title="Create new revision">
-          <div className="asFormGrid">
-            <Field label="Name">
-              <input className="asInput" value={createName} onChange={(e) => setCreateName(e.currentTarget.value)} />
-            </Field>
-            <Field label="Author (optional)">
-              <input className="asInput" value={createAuthor} onChange={(e) => setCreateAuthor(e.currentTarget.value)} />
-            </Field>
-          </div>
-          <Field label="Spec JSON" hint="This is the versioned artifact. Store prompts, tools, model params, guardrails, and the handoff graph here.">
-            <textarea className="asTextarea" value={createSpecText} onChange={(e) => setCreateSpecText(e.currentTarget.value)} rows={14} />
-          </Field>
-          <div className="asRow">
-            <Button tone="primary" onClick={createRevision} disabled={createBusy}>
-              {createBusy ? "Creating…" : "Create revision"}
-            </Button>
-          </div>
-        </Card>
       </div>
 
       <div className="asCol">
-        <Card title="Selected revision">
-          {selected ? (
-            <div className="asStack">
-              <div className="asKeyValue">
-                <div className="k">ID</div>
-                <div className="v asMono">{selected.id}</div>
-              </div>
-              <div className="asKeyValue">
-                <div className="k">Created</div>
-                <div className="v">{formatDateTime(selected.created_at)}</div>
-              </div>
-              <div className="asKeyValue">
-                <div className="k">Content hash</div>
-                <div className="v asMono">{selected.content_hash}</div>
-              </div>
-              <Field label="Spec JSON (read-only)">
-                <textarea className="asTextarea" readOnly value={prettyJson(selected.spec_json)} rows={12} />
-              </Field>
-            </div>
-          ) : (
-            <div className="asMuted">Select a revision to see details.</div>
-          )}
-        </Card>
-
-        <Card title="Run this revision">
-          {selected ? (
-            <>
-              <Field label="Inputs JSON">
-                <textarea className="asTextarea" value={runInputsText} onChange={(e) => setRunInputsText(e.currentTarget.value)} rows={6} />
-              </Field>
-              <Field label="Tags JSON">
-                <textarea className="asTextarea" value={runTagsText} onChange={(e) => setRunTagsText(e.currentTarget.value)} rows={4} />
-              </Field>
-              <Field label="Group ID (optional)" hint="Useful for dataset runs / regression tracking.">
-                <input className="asInput" value={runGroupId} onChange={(e) => setRunGroupId(e.currentTarget.value)} />
-              </Field>
-              <div className="asRow">
-                <Button tone="primary" onClick={startRun} disabled={runBusy}>
-                  {runBusy ? "Starting…" : "Start run"}
-                </Button>
-                {runCreated ? <span className="asMono asSmall">run_id: {runCreated.id}</span> : null}
-              </div>
-            </>
-          ) : (
-            <div className="asMuted">Pick a revision first.</div>
-          )}
-        </Card>
-
-        <Card title="Diff revisions" right={<span className="asSmall asMuted">Compare → Selected</span>}>
-          {revs && revs.length > 1 ? (
-            <>
-              <Field label="Compare against">
-                <select className="asSelect" value={compareId ?? ""} onChange={(e) => setCompareId(e.currentTarget.value || null)}>
-                  <option value="">(none)</option>
-                  {revs
-                    .filter((r) => r.id !== selectedId)
-                    .map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.name} · {r.id.slice(0, 8)}
-                      </option>
-                    ))}
-                </select>
-              </Field>
-              {semanticDiff && semanticDiff.length > 0 ? (
-                <div className="asStack">
-                  {semanticDiff.map((item, idx) => (
-                    <div key={`${item.kind}-${idx}`} className={`asDiffLine ${item.kind}`}>
-                      <span className="asDiffGlyph">{item.kind === "add" ? "+" : item.kind === "del" ? "-" : "~"}</span>
-                      <span>{item.text}</span>
-                    </div>
-                  ))}
+        <div className="asStack">
+          <Card title="Selected version">
+            {selectedRevision ? (
+              <div className="asStack">
+                <div className="asKeyValue">
+                  <div className="k">Agent</div>
+                  <div className="v">{selectedRevision.name}</div>
                 </div>
-              ) : null}
-              {diffText ? (
-                <pre className="asDiff">
-                  {diffText.map((d, idx) => (
-                    <div key={idx} className={`asDiffLine ${d.kind}`}>
-                      <span className="asDiffGlyph">{d.kind === "add" ? "+" : d.kind === "del" ? "-" : " "}</span>
-                      <span>{d.text}</span>
-                    </div>
-                  ))}
-                </pre>
-              ) : (
-                <div className="asMuted">Select a “compare” revision to see a simple line diff.</div>
-              )}
-            </>
-          ) : (
-            <div className="asMuted">Create at least 2 revisions to compare.</div>
-          )}
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-function RunLauncherPage(props: {
-  backend: BackendConfig;
-  recentRunIds: string[];
-  setRecentRunIds: React.Dispatch<React.SetStateAction<string[]>>;
-}) {
-  const [runId, setRunId] = useState(props.recentRunIds[0] ?? "");
-  const [run, setRun] = useState<RunResponse | null>(null);
-  const [events, setEvents] = useState<RunEventResponse[] | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  async function load() {
-    const id = runId.trim();
-    if (!id) return;
-    setBusy(true);
-    try {
-      setErr(null);
-      const r = await api(props.backend).getRun(id);
-      const evs = await api(props.backend).listRunEvents(id);
-      setRun(r);
-      setEvents(evs);
-      props.setRecentRunIds((s) => uniq([id, ...s]).slice(0, 50));
-    } catch (e) {
-      setRun(null);
-      setEvents(null);
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function cancel() {
-    if (!run) return;
-    try {
-      await api(props.backend).cancelRun(run.id);
-      await load();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  return (
-    <div className="asGrid2">
-      <div className="asCol">
-        <Card title="Open run">
-          {err ? <div className="asError">{err}</div> : null}
-          <div className="asRow">
-            <input className="asInput" placeholder="run_id…" value={runId} onChange={(e) => setRunId(e.currentTarget.value)} />
-            <Button tone="primary" onClick={load} disabled={busy}>
-              {busy ? "Loading…" : "Load"}
-            </Button>
-          </div>
-          {props.recentRunIds.length ? (
-            <div className="asSmall asMuted">
-              Recent:{" "}
-              {props.recentRunIds.slice(0, 8).map((id) => (
-                <button key={id} className="asLink" type="button" onClick={() => setRunId(id)}>
-                  {id.slice(0, 8)}
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </Card>
-
-        <Card title="Run details" right={run ? <span className={`asStatus ${run.status}`}>{run.status}</span> : null}>
-          {run ? (
-            <div className="asStack">
-              <div className="asKeyValue">
-                <div className="k">Run ID</div>
-                <div className="v asMono">{run.id}</div>
-              </div>
-              <div className="asKeyValue">
-                <div className="k">Revision</div>
-                <div className="v asMono">{run.agent_revision_id}</div>
-              </div>
-              <div className="asKeyValue">
-                <div className="k">Started</div>
-                <div className="v">{formatDateTime(run.started_at)}</div>
-              </div>
-              <div className="asKeyValue">
-                <div className="k">Ended</div>
-                <div className="v">{run.ended_at ? formatDateTime(run.ended_at) : "—"}</div>
-              </div>
-              <div className="asKeyValue">
-                <div className="k">Duration</div>
-                <div className="v">
-                  {run.ended_at ? formatDurationMs(Date.parse(run.ended_at) - Date.parse(run.started_at)) : "—"}
+                <div className="asKeyValue">
+                  <div className="k">Revision</div>
+                  <div className="v asMono">{selectedRevision.id}</div>
+                </div>
+                <div className="asKeyValue">
+                  <div className="k">Created</div>
+                  <div className="v">{formatDateTime(selectedRevision.created_at)}</div>
+                </div>
+                <div className="asKeyValue">
+                  <div className="k">Content hash</div>
+                  <div className="v asMono">{selectedRevision.content_hash}</div>
                 </div>
               </div>
-              <div className="asKeyValue">
-                <div className="k">Cancel requested</div>
-                <div className="v">{run.cancel_requested ? "true" : "false"}</div>
-              </div>
-              {run.error ? <div className="asError asMono">{run.error}</div> : null}
-              <Field label="Inputs">
-                <textarea className="asTextarea" readOnly value={prettyJson(run.inputs_json)} rows={6} />
-              </Field>
-              <Field label="Final output">
-                <textarea className="asTextarea" readOnly value={run.final_output ?? ""} rows={5} placeholder="(not completed yet)" />
-              </Field>
-              <div className="asRow">
-                <Button tone="neutral" onClick={load} disabled={busy}>
-                  Refresh
-                </Button>
-                <Button tone="danger" onClick={cancel} disabled={run.status !== "running" && run.status !== "queued"}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <div className="asMuted">Load a run to see its details.</div>
-          )}
-        </Card>
-      </div>
-
-      <div className="asCol">
-        <Card title="Persisted events" right={events ? <span className="asSmall asMuted">{events.length} events</span> : null}>
-          {events ? (
-            <div className="asEvents">
-              {events.map((ev) => (
-                <EventRow key={ev.id} ev={ev} />
-              ))}
-              {events.length === 0 ? <div className="asMuted">No events yet.</div> : null}
-            </div>
-          ) : (
-            <div className="asMuted">Load a run to view its persisted events.</div>
-          )}
-        </Card>
-      </div>
-    </div>
-  );
-}
-
-function LiveTracePage(props: { backend: BackendConfig; recentRunIds: string[] }) {
-  const [runId, setRunId] = useState(props.recentRunIds[0] ?? "");
-  const [status, setStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
-  const [err, setErr] = useState<string | null>(null);
-  const [events, setEvents] = useState<RunEventResponse[]>([]);
-  const lastSeqRef = useRef<number>(0);
-  const esRef = useRef<EventSource | null>(null);
-
-  function disconnect() {
-    esRef.current?.close();
-    esRef.current = null;
-    setStatus("idle");
-  }
-
-  function connect() {
-    const id = runId.trim();
-    if (!id) return;
-    disconnect();
-    setStatus("connecting");
-    setErr(null);
-    setEvents([]);
-    lastSeqRef.current = 0;
-
-    const url = `${props.backend.baseUrl}/v1/runs/${encodeURIComponent(id)}/events/stream`;
-    const es = new EventSource(url);
-    esRef.current = es;
-
-    es.addEventListener("run_event", (msg) => {
-      try {
-        const data = JSON.parse((msg as MessageEvent).data) as RunEventResponse;
-        lastSeqRef.current = Math.max(lastSeqRef.current, data.seq ?? 0);
-        setEvents((prev) => [...prev, data].slice(-2000));
-        setStatus("connected");
-      } catch (e) {
-        setStatus("error");
-        setErr(e instanceof Error ? e.message : String(e));
-      }
-    });
-
-    es.onerror = () => {
-      setStatus("error");
-      setErr("SSE connection error (backend down, CORS blocked, or run_id not found).");
-    };
-  }
-
-  async function loadBacklog() {
-    const id = runId.trim();
-    if (!id) return;
-    try {
-      const evs = await api(props.backend).listRunEvents(id, 2000, 0);
-      setEvents(evs);
-      lastSeqRef.current = evs.length ? evs[evs.length - 1]!.seq : 0;
-      setErr(null);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  useEffect(() => {
-    return () => {
-      disconnect();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  return (
-    <div className="asGrid2">
-      <div className="asCol">
-        <Card
-          title="Live trace (SSE)"
-          right={<span className={`asStatusPill ${status}`}>{status}</span>}
-        >
-          {err ? <div className="asError">{err}</div> : null}
-          <Field label="Run ID">
-            <input className="asInput" value={runId} onChange={(e) => setRunId(e.currentTarget.value)} placeholder="run_id…" />
-          </Field>
-          <div className="asRow">
-            <Button tone="neutral" onClick={loadBacklog}>
-              Load backlog
-            </Button>
-            <Button tone="primary" onClick={connect}>
-              Connect
-            </Button>
-            <Button tone="neutral" onClick={disconnect}>
-              Disconnect
-            </Button>
-          </div>
-          <div className="asSmall asMuted">
-            Tip: the backend emits <span className="asMono">span.started</span>/<span className="asMono">span.completed</span> so you can treat
-            these as “spans” in the timeline.
-          </div>
-        </Card>
-      </div>
-
-      <div className="asCol">
-        <Card title="Timeline" right={<span className="asSmall asMuted">{events.length} events</span>}>
-          <div className="asEvents">
-            {events.map((ev) => (
-              <EventRow key={ev.id} ev={ev} />
-            ))}
-            {events.length === 0 ? <div className="asMuted">No events yet.</div> : null}
-          </div>
-        </Card>
+            ) : (
+              <div className="asMuted">Select an agent and version to see details.</div>
+            )}
+          </Card>
+          <TraceViewer
+            backend={props.backend}
+            runId={runCreated?.id ?? null}
+            mode="stream"
+            emptyMessage="Start a run to stream events here."
+            waitingMessage="Waiting for events…"
+            title="Agent trace"
+          />
+        </div>
       </div>
     </div>
   );
@@ -683,6 +406,7 @@ function DashboardPage(props: { backend: BackendConfig; recentRunIds: string[] }
   const [runs, setRuns] = useState<RunResponse[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   async function load() {
     if (!props.recentRunIds.length) {
@@ -706,6 +430,16 @@ function DashboardPage(props: { backend: BackendConfig; recentRunIds: string[] }
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.backend.baseUrl, props.recentRunIds.join("|")]);
+
+  useEffect(() => {
+    if (!runs || runs.length === 0) {
+      setSelectedRunId(null);
+      return;
+    }
+    if (!selectedRunId || !runs.some((r) => r.id === selectedRunId)) {
+      setSelectedRunId(runs[0].id);
+    }
+  }, [runs, selectedRunId]);
 
   const stats = useMemo(() => {
     const rs = runs ?? [];
@@ -754,31 +488,57 @@ function DashboardPage(props: { backend: BackendConfig; recentRunIds: string[] }
         <div className="asSmall asMuted">This is a lightweight placeholder until the backend adds real aggregates/list-runs endpoints.</div>
       </Card>
 
-      <Card title="Recent runs">
-        {runs ? (
-          <div className="asTable">
-            <div className="asTableHead">
-              <div>Run</div>
-              <div>Status</div>
-              <div>Started</div>
-              <div>Ended</div>
-            </div>
-            {runs.map((r) => (
-              <div key={r.id} className="asTableRow">
-                <div className="asMono">{r.id.slice(0, 8)}</div>
-                <div>
-                  <span className={`asStatus ${r.status}`}>{r.status}</span>
+      <div className="asGrid2">
+        <div className="asCol">
+          <Card title="Recent runs">
+            {runs ? (
+              <div className="asTable">
+                <div className="asTableHead">
+                  <div>Run</div>
+                  <div>Status</div>
+                  <div>Started</div>
+                  <div>Ended</div>
                 </div>
-                <div>{formatDateTime(r.started_at)}</div>
-                <div>{r.ended_at ? formatDateTime(r.ended_at) : "—"}</div>
+                {runs.map((r) => (
+                  <div
+                    key={r.id}
+                    className={`asTableRow clickable ${selectedRunId === r.id ? "active" : ""}`}
+                    onClick={() => setSelectedRunId(r.id)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedRunId(r.id);
+                      }
+                    }}
+                  >
+                    <div className="asMono">{r.id.slice(0, 8)}</div>
+                    <div>
+                      <span className={`asStatus ${r.status}`}>{r.status}</span>
+                    </div>
+                    <div>{formatDateTime(r.started_at)}</div>
+                    <div>{r.ended_at ? formatDateTime(r.ended_at) : "—"}</div>
+                  </div>
+                ))}
+                {runs.length === 0 ? <div className="asMuted">No recent runs yet. Start one from “Prompt revisions”.</div> : null}
               </div>
-            ))}
-            {runs.length === 0 ? <div className="asMuted">No recent runs yet. Start one from “Prompt revisions”.</div> : null}
-          </div>
-        ) : (
-          <div className="asMuted">Loading…</div>
-        )}
-      </Card>
+            ) : (
+              <div className="asMuted">Loading…</div>
+            )}
+          </Card>
+        </div>
+        <div className="asCol">
+          <TraceViewer
+            backend={props.backend}
+            runId={selectedRunId}
+            mode="static"
+            emptyMessage="Select a run to view its trace."
+            waitingMessage="Loading trace events…"
+            title="Run trace"
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -792,12 +552,134 @@ function Metric(props: { label: string; value: string }) {
   );
 }
 
+type TraceMode = "stream" | "static";
+
+function TraceViewer(props: {
+  backend: BackendConfig;
+  runId: string | null;
+  mode: TraceMode;
+  emptyMessage: string;
+  waitingMessage: string;
+  title: string;
+}) {
+  const [traceStatus, setTraceStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
+  const [traceErr, setTraceErr] = useState<string | null>(null);
+  const [traceEvents, setTraceEvents] = useState<RunEventResponse[]>([]);
+  const esRef = useRef<EventSource | null>(null);
+
+  function disconnectTrace() {
+    esRef.current?.close();
+    esRef.current = null;
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadStatic(runId: string) {
+      setTraceStatus("connecting");
+      setTraceErr(null);
+      setTraceEvents([]);
+      try {
+        const events = await api(props.backend).listRunEvents(runId, 500, 0);
+        if (cancelled) return;
+        setTraceEvents(events);
+        setTraceStatus("connected");
+      } catch (e) {
+        if (cancelled) return;
+        setTraceStatus("error");
+        setTraceErr(e instanceof Error ? e.message : String(e));
+      }
+    }
+
+    function connectStream(runId: string) {
+      disconnectTrace();
+      setTraceStatus("connecting");
+      setTraceErr(null);
+      setTraceEvents([]);
+      const url = `${props.backend.baseUrl}/v1/runs/${encodeURIComponent(runId)}/events/stream`;
+      const es = new EventSource(url);
+      esRef.current = es;
+
+      es.addEventListener("run_event", (msg) => {
+        try {
+          const data = JSON.parse((msg as MessageEvent).data) as RunEventResponse;
+          setTraceEvents((prev) => [...prev, data].slice(-2000));
+          setTraceStatus("connected");
+        } catch (e) {
+          setTraceStatus("error");
+          setTraceErr(e instanceof Error ? e.message : String(e));
+        }
+      });
+
+      es.onerror = () => {
+        setTraceStatus("error");
+        setTraceErr("SSE connection error (backend down, CORS blocked, or run_id not found).");
+      };
+    }
+
+    if (!props.runId) {
+      disconnectTrace();
+      setTraceStatus("idle");
+      setTraceErr(null);
+      setTraceEvents([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (props.mode === "stream") {
+      connectStream(props.runId);
+    } else {
+      disconnectTrace();
+      loadStatic(props.runId);
+    }
+
+    return () => {
+      cancelled = true;
+      disconnectTrace();
+    };
+  }, [props.backend.baseUrl, props.mode, props.runId]);
+
+  return (
+    <Card title={props.title} right={<span className={`asStatusPill ${traceStatus}`}>{traceStatus}</span>}>
+      {traceErr ? <div className="asError">{traceErr}</div> : null}
+      {props.runId ? <div className="asSmall asMuted">run_id: {props.runId}</div> : null}
+      <div className="asEvents">
+        {traceEvents.map((ev) => (
+          <EventRow key={ev.id} ev={ev} />
+        ))}
+        {props.runId && traceEvents.length === 0 ? <div className="asMuted">{props.waitingMessage}</div> : null}
+        {!props.runId ? <div className="asMuted">{props.emptyMessage}</div> : null}
+      </div>
+    </Card>
+  );
+}
+
 function SettingsPage(props: { settings: AppSettings; setSettings: (s: AppSettings) => void }) {
   const [baseUrl, setBaseUrl] = useState(props.settings.backendBaseUrl);
+  const [llmProvider, setLlmProvider] = useState<AppSettings["llmProvider"]>(props.settings.llmProvider);
+  const [connections, setConnections] = useState(props.settings.llmConnections);
   const [msg, setMsg] = useState<string | null>(null);
 
   function save() {
-    const next = { ...props.settings, backendBaseUrl: baseUrl.trim() || "http://127.0.0.1:37123" };
+    const nextConnections = { ...connections };
+    for (const provider of LLM_PROVIDERS) {
+      const def = LLM_PROVIDER_DEFS[provider];
+      const cfg = { ...nextConnections[provider] };
+      for (const field of def.fields) {
+        const value = cfg[field.key];
+        if (typeof value === "string") {
+          cfg[field.key] = value.trim();
+        }
+      }
+      nextConnections[provider] = cfg;
+    }
+    const next = {
+      ...props.settings,
+      backendBaseUrl: baseUrl.trim() || "http://127.0.0.1:37123",
+      llmProvider,
+      llmConnections: nextConnections,
+    };
     props.setSettings(next);
     saveSettings(next);
     setMsg("Saved.");
@@ -810,18 +692,43 @@ function SettingsPage(props: { settings: AppSettings; setSettings: (s: AppSettin
         <Field label="Backend base URL" hint="Default backend port is 37123 (see backend/README.md).">
           <input className="asInput" value={baseUrl} onChange={(e) => setBaseUrl(e.currentTarget.value)} />
         </Field>
+        <div className="asSectionTitle">LLM connections</div>
+        <Field label="Provider">
+          <select className="asSelect" value={llmProvider} onChange={(e) => setLlmProvider(e.currentTarget.value as AppSettings["llmProvider"])}>
+            {LLM_PROVIDERS.map((provider) => (
+              <option key={provider} value={provider}>
+                {LLM_PROVIDER_LABELS[provider]}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {LLM_PROVIDER_DEFS[llmProvider].fields.map((field) => (
+          <Field key={`${llmProvider}-${field.key}`} label={field.label}>
+            <input
+              className="asInput"
+              type={field.inputType ?? "text"}
+              placeholder={field.placeholder}
+              value={connections[llmProvider]?.[field.key] ?? ""}
+              onChange={(e) =>
+                setConnections((prev) => ({
+                  ...prev,
+                  [llmProvider]: {
+                    ...prev[llmProvider],
+                    [field.key]: e.currentTarget.value,
+                  },
+                }))
+              }
+            />
+          </Field>
+        ))}
+        <div className="asSmall asMuted">
+          Credentials are stored locally in this browser profile.
+        </div>
         <div className="asRow">
           <Button tone="primary" onClick={save}>
             Save
           </Button>
           {msg ? <div className="asSmall asMuted">{msg}</div> : null}
-        </div>
-      </Card>
-
-      <Card title="Notes">
-        <div className="asSmall asMuted">
-          The backend is local-first and can run with the mock executor (no API keys). If you’re running this UI in Tauri dev, you may need to
-          enable CORS via <span className="asMono">AGENT_STUDIO_ALLOW_CORS_ORIGINS</span>.
         </div>
       </Card>
     </div>
@@ -840,70 +747,6 @@ function EventRow(props: { ev: RunEventResponse }) {
       <pre className="asEventPayload">{payload}</pre>
     </details>
   );
-}
-
-function isGraphEnvelope(value: unknown): value is AgentSpecEnvelope {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const v = value as AgentSpecEnvelope;
-  return v.schema_version === "graph-v1" && !!v.graph && Array.isArray(v.graph.nodes);
-}
-
-function diffGraph(
-  a: AgentSpecEnvelope,
-  b: AgentSpecEnvelope,
-): Array<{ kind: "add" | "del" | "mod"; text: string }> {
-  const out: Array<{ kind: "add" | "del" | "mod"; text: string }> = [];
-  const aNodes = new Map(a.graph.nodes.map((n) => [n.id, n]));
-  const bNodes = new Map(b.graph.nodes.map((n) => [n.id, n]));
-
-  for (const [id, node] of aNodes) {
-    if (!bNodes.has(id)) {
-      out.push({ kind: "del", text: `Removed node ${node.type} (${id})` });
-    }
-  }
-  for (const [id, node] of bNodes) {
-    if (!aNodes.has(id)) {
-      out.push({ kind: "add", text: `Added node ${node.type} (${id})` });
-    }
-  }
-
-  for (const [id, node] of bNodes) {
-    const prev = aNodes.get(id);
-    if (!prev) continue;
-    if (prev.type !== node.type) {
-      out.push({ kind: "mod", text: `Node ${id} type changed ${prev.type} → ${node.type}` });
-      continue;
-    }
-    if (prev.name !== node.name) {
-      out.push({ kind: "mod", text: `Node ${id} name changed` });
-    }
-    if (node.type === "llm") {
-      const prevModel = JSON.stringify((prev as AgentNode & { model?: unknown }).model ?? {});
-      const nextModel = JSON.stringify((node as AgentNode & { model?: unknown }).model ?? {});
-      if (prevModel !== nextModel) out.push({ kind: "mod", text: `LLM ${id} model updated` });
-      const prevPrompt = (prev as AgentNode & { system_prompt?: string }).system_prompt ?? "";
-      const nextPrompt = (node as AgentNode & { system_prompt?: string }).system_prompt ?? "";
-      if (prevPrompt !== nextPrompt) out.push({ kind: "mod", text: `LLM ${id} system prompt changed` });
-    }
-    if (node.type === "tool") {
-      const prevName = (prev as AgentNode & { tool_name?: string }).tool_name ?? "";
-      const nextName = (node as AgentNode & { tool_name?: string }).tool_name ?? "";
-      if (prevName !== nextName) out.push({ kind: "mod", text: `Tool ${id} name changed` });
-    }
-  }
-
-  const edgeKey = (e: { source: string; target: string; label?: string | null }) =>
-    `${e.source}::${e.target}::${e.label ?? ""}`;
-  const aEdges = new Set(a.graph.edges.map(edgeKey));
-  const bEdges = new Set(b.graph.edges.map(edgeKey));
-  for (const key of aEdges) {
-    if (!bEdges.has(key)) out.push({ kind: "del", text: `Removed edge ${key}` });
-  }
-  for (const key of bEdges) {
-    if (!aEdges.has(key)) out.push({ kind: "add", text: `Added edge ${key}` });
-  }
-
-  return out;
 }
 
 function uniq(ids: string[]): string[] {

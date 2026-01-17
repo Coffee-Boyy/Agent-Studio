@@ -1,3 +1,5 @@
+import type { LlmProvider } from "./llm";
+
 export type IsoDateTimeString = string;
 
 export type HealthResponse = {
@@ -6,7 +8,6 @@ export type HealthResponse = {
 
 export type AgentRevisionCreateRequest = {
   name: string;
-  author: string | null;
   spec_json: Record<string, unknown>;
 };
 
@@ -14,9 +15,16 @@ export type AgentRevisionResponse = {
   id: string;
   name: string;
   created_at: IsoDateTimeString;
-  author: string | null;
   content_hash: string;
   spec_json: Record<string, unknown>;
+};
+
+export type LlmConnection = {
+  provider: LlmProvider;
+  api_key?: string;
+  base_url?: string;
+  organization?: string;
+  project?: string;
 };
 
 export type RunCreateRequest = {
@@ -24,6 +32,7 @@ export type RunCreateRequest = {
   inputs_json: Record<string, unknown>;
   tags_json: Record<string, unknown>;
   group_id: string | null;
+  llm_connection?: LlmConnection;
 };
 
 export type RunResponse = {
@@ -120,6 +129,7 @@ export type HandoffNode = NodeBase & {
 export type SubAgentNode = NodeBase & {
   type: "subagent";
   agent_name: string;
+  agent_revision_id?: string;
   system_prompt?: string;
 };
 

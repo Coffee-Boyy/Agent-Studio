@@ -646,6 +646,12 @@ body,
   align-content: start;
 }
 
+.asEditorRight {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
 .asEditorCanvas {
   border-radius: 14px;
   border: 1px solid rgba(148, 163, 184, 0.25);
@@ -655,6 +661,10 @@ body,
   /* ReactFlow needs a concrete height; min-height is not enough for % heights */
   height: 70vh;
   position: relative;
+}
+
+.asEditorFooter {
+  margin-top: 14px;
 }
 .asEditorCanvas .react-flow {
   width: 100%;
@@ -743,6 +753,22 @@ body,
   font-size: 12px;
   opacity: 0.8;
   padding-left: 4px;
+}
+.asContextMenu {
+  position: fixed;
+  z-index: 20;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+}
+@media (prefers-color-scheme: dark) {
+  .asContextMenu {
+    background: rgba(2, 6, 23, 0.9);
+    border-color: rgba(148, 163, 184, 0.2);
+    box-shadow: 0 12px 24px rgba(2, 6, 23, 0.6);
+  }
 }
 
 /* Modal */
@@ -855,6 +881,45 @@ body,
 .asFlowNode.type-output {
   border-left: 4px solid rgba(148, 163, 184, 0.9);
 }
+.asFlowNode.isSelected {
+  box-shadow: 0 0 0 1px rgba(100, 108, 255, 0.35), 0 0 16px rgba(100, 108, 255, 0.5),
+    0 12px 28px rgba(2, 6, 23, 0.18);
+}
+@media (prefers-color-scheme: dark) {
+  .asFlowNode.isSelected {
+    box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.4), 0 0 16px rgba(148, 163, 184, 0.38),
+      0 14px 30px rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* Palette buttons */
+.asPaletteBtn {
+  border-left-width: 4px;
+  border-left-style: solid;
+  padding-left: 10px;
+}
+.asPaletteBtn.type-input {
+  border-left-color: rgba(59, 130, 246, 0.9);
+}
+.asPaletteBtn.type-llm {
+  border-left-color: rgba(100, 108, 255, 0.95);
+}
+.asPaletteBtn.type-tool {
+  border-left-color: rgba(34, 197, 94, 0.9);
+}
+.asPaletteBtn.type-guardrail {
+  border-left-color: rgba(245, 158, 11, 0.95);
+}
+.asPaletteBtn.type-router {
+  border-left-color: rgba(236, 72, 153, 0.9);
+}
+.asPaletteBtn.type-handoff,
+.asPaletteBtn.type-subagent {
+  border-left-color: rgba(20, 184, 166, 0.9);
+}
+.asPaletteBtn.type-output {
+  border-left-color: rgba(148, 163, 184, 0.9);
+}
 
 .asFlowNode .react-flow__handle {
   position: absolute;
@@ -938,9 +1003,26 @@ body,
   border: 1px solid rgba(148, 163, 184, 0.16);
   background: rgba(255, 255, 255, 0.45);
 }
+.asTableRow.clickable {
+  cursor: pointer;
+}
+.asTableRow.clickable:hover {
+  border-color: rgba(59, 130, 246, 0.4);
+}
+.asTableRow.active {
+  border-color: rgba(59, 130, 246, 0.6);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.25);
+}
 @media (prefers-color-scheme: dark) {
   .asTableRow {
     background: rgba(2, 6, 23, 0.2);
     border-color: rgba(148, 163, 184, 0.12);
+  }
+  .asTableRow.clickable:hover {
+    border-color: rgba(96, 165, 250, 0.5);
+  }
+  .asTableRow.active {
+    border-color: rgba(96, 165, 250, 0.7);
+    box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.3);
   }
 }
