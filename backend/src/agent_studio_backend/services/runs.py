@@ -98,6 +98,38 @@ class RunService:
         )
         return ev
 
+    async def update_event(
+        self,
+        session: Session,
+        *,
+        run_id: str,
+        event_id: str,
+        payload_json: dict[str, Any],
+    ) -> Optional[RunEvent]:
+        """
+        Update an existing event payload and publish it to SSE subscribers.
+        """
+        ev = session.get(RunEvent, event_id)
+        if not ev or ev.run_id != run_id:
+            return None
+        ev.payload_json = payload_json
+        session.add(ev)
+        session.commit()
+        session.refresh(ev)
+
+        await EVENT_BUS.publish(
+            run_id,
+            {
+                "id": ev.id,
+                "run_id": ev.run_id,
+                "created_at": ev.created_at.isoformat(),
+                "seq": ev.seq,
+                "type": ev.type,
+                "payload_json": ev.payload_json,
+            },
+        )
+        return ev
+
     async def _set_run_status(
         self,
         session: Session,
@@ -134,14 +166,23 @@ class RunService:
         with session_factory() as session:
             await self._set_run_status(session, run_id=run_id, status="running")
 
-        async def emit(type: str, payload: dict[str, Any]):
+        async def emit(type: str, payload: dict[str, Any], *, update_event_id: Optional[str] = None):
             with session_factory() as session:
                 run = session.get(Run, run_id)
                 if not run:
                     raise RuntimeError("run_not_found")
                 if run.cancel_requested:
                     raise CancelledError("cancel_requested")
-                await self.emit_event(session, run_id=run_id, type=type, payload_json=payload)
+                if update_event_id:
+                    updated = await self.update_event(
+                        session,
+                        run_id=run_id,
+                        event_id=update_event_id,
+                        payload_json=payload,
+                    )
+                    if updated is not None:
+                        return updated
+                return await self.emit_event(session, run_id=run_id, type=type, payload_json=payload)
 
         try:
             output = await self._executor.run(

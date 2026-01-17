@@ -1,6 +1,6 @@
 import "./App.css";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AgentRevisionResponse,
   AgentSpecEnvelope,
@@ -8,7 +8,6 @@ import type {
   LLMNode,
   LlmConnection,
   RunCreateRequest,
-  RunEventResponse,
   RunResponse,
 } from "./lib/types";
 import { api, type BackendConfig } from "./lib/api";
@@ -23,6 +22,7 @@ import {
 import { loadSettings, saveSettings, type AppSettings } from "./lib/storage";
 import { formatDateTime, formatDurationMs, prettyJson, tryParseJsonObject } from "./lib/json";
 import { AgentEditorPage } from "./pages/AgentEditorPage";
+import { TraceViewer } from "./components/TraceViewer";
 
 type Route = "editor" | "runner" | "dashboard" | "settings";
 
@@ -552,109 +552,6 @@ function Metric(props: { label: string; value: string }) {
   );
 }
 
-type TraceMode = "stream" | "static";
-
-function TraceViewer(props: {
-  backend: BackendConfig;
-  runId: string | null;
-  mode: TraceMode;
-  emptyMessage: string;
-  waitingMessage: string;
-  title: string;
-}) {
-  const [traceStatus, setTraceStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
-  const [traceErr, setTraceErr] = useState<string | null>(null);
-  const [traceEvents, setTraceEvents] = useState<RunEventResponse[]>([]);
-  const esRef = useRef<EventSource | null>(null);
-
-  function disconnectTrace() {
-    esRef.current?.close();
-    esRef.current = null;
-  }
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadStatic(runId: string) {
-      setTraceStatus("connecting");
-      setTraceErr(null);
-      setTraceEvents([]);
-      try {
-        const events = await api(props.backend).listRunEvents(runId, 500, 0);
-        if (cancelled) return;
-        setTraceEvents(events);
-        setTraceStatus("connected");
-      } catch (e) {
-        if (cancelled) return;
-        setTraceStatus("error");
-        setTraceErr(e instanceof Error ? e.message : String(e));
-      }
-    }
-
-    function connectStream(runId: string) {
-      disconnectTrace();
-      setTraceStatus("connecting");
-      setTraceErr(null);
-      setTraceEvents([]);
-      const url = `${props.backend.baseUrl}/v1/runs/${encodeURIComponent(runId)}/events/stream`;
-      const es = new EventSource(url);
-      esRef.current = es;
-
-      es.addEventListener("run_event", (msg) => {
-        try {
-          const data = JSON.parse((msg as MessageEvent).data) as RunEventResponse;
-          setTraceEvents((prev) => [...prev, data].slice(-2000));
-          setTraceStatus("connected");
-        } catch (e) {
-          setTraceStatus("error");
-          setTraceErr(e instanceof Error ? e.message : String(e));
-        }
-      });
-
-      es.onerror = () => {
-        setTraceStatus("error");
-        setTraceErr("SSE connection error (backend down, CORS blocked, or run_id not found).");
-      };
-    }
-
-    if (!props.runId) {
-      disconnectTrace();
-      setTraceStatus("idle");
-      setTraceErr(null);
-      setTraceEvents([]);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    if (props.mode === "stream") {
-      connectStream(props.runId);
-    } else {
-      disconnectTrace();
-      loadStatic(props.runId);
-    }
-
-    return () => {
-      cancelled = true;
-      disconnectTrace();
-    };
-  }, [props.backend.baseUrl, props.mode, props.runId]);
-
-  return (
-    <Card title={props.title} right={<span className={`asStatusPill ${traceStatus}`}>{traceStatus}</span>}>
-      {traceErr ? <div className="asError">{traceErr}</div> : null}
-      {props.runId ? <div className="asSmall asMuted">run_id: {props.runId}</div> : null}
-      <div className="asEvents">
-        {traceEvents.map((ev) => (
-          <EventRow key={ev.id} ev={ev} />
-        ))}
-        {props.runId && traceEvents.length === 0 ? <div className="asMuted">{props.waitingMessage}</div> : null}
-        {!props.runId ? <div className="asMuted">{props.emptyMessage}</div> : null}
-      </div>
-    </Card>
-  );
-}
-
 function SettingsPage(props: { settings: AppSettings; setSettings: (s: AppSettings) => void }) {
   const [baseUrl, setBaseUrl] = useState(props.settings.backendBaseUrl);
   const [llmProvider, setLlmProvider] = useState<AppSettings["llmProvider"]>(props.settings.llmProvider);
@@ -732,20 +629,6 @@ function SettingsPage(props: { settings: AppSettings; setSettings: (s: AppSettin
         </div>
       </Card>
     </div>
-  );
-}
-
-function EventRow(props: { ev: RunEventResponse }) {
-  const payload = useMemo(() => prettyJson(props.ev.payload_json), [props.ev.payload_json]);
-  return (
-    <details className="asEvent">
-      <summary className="asEventSummary">
-        <span className="asEventSeq asMono">{String(props.ev.seq).padStart(4, "0")}</span>
-        <span className="asEventType asMono">{props.ev.type}</span>
-        <span className="asEventTime">{formatDateTime(props.ev.created_at)}</span>
-      </summary>
-      <pre className="asEventPayload">{payload}</pre>
-    </details>
   );
 }
 

@@ -41,6 +41,7 @@ import type {
   ToolNode,
   ValidationIssue,
 } from "../lib/types";
+import { TraceViewer } from "../components/TraceViewer";
 
 const DEFAULT_GRAPH: AgentGraphDocV1 = {
   schema_version: "graph-v1",
@@ -177,9 +178,11 @@ function newNode(type: AgentNode["type"], idx: number): AgentNode {
       type,
       name: "Tool",
       position,
-      tool_name: "my_tool",
+      tool_name: "Tool",
+      language: "python",
       description: "",
-      schema: {},
+      schema: { type: "object", properties: {}, additionalProperties: false },
+      code: 'def run(ctx, **kwargs):\n    return {"received": kwargs}\n',
     };
   }
   if (type === "guardrail") {
@@ -273,7 +276,7 @@ function useUndoRedoState<T>(initial: () => T): UndoRedoState<T> {
 
 function AgentFlowNode(props: { data: { label: string; nodeType: string; name: string; issueCount: number }; selected?: boolean }) {
   const { data, selected } = props;
-  const isSourceOnly = data.nodeType === "input";
+  const isSourceOnly = data.nodeType === "input" || data.nodeType === "tool";
   const isTargetOnly = data.nodeType === "output";
 
   return (
@@ -382,6 +385,14 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
     refreshRevisions();
   }, [refreshRevisions]);
 
+  useEffect(() => {
+    if (selectedRevId || !revs || revs.length === 0) return;
+    const first = revs[0];
+    setSelectedRevId(first.id);
+    setName(first.name || "Visual agent");
+    loadRevision(first.id);
+  }, [revs, selectedRevId]);
+
   const onNodesChange: OnNodesChange = useCallback((changes) => {
     setFlowNodes((prev) => {
       const next = applyNodeChanges(changes, prev);
@@ -408,6 +419,14 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
 
   const onConnect = useCallback((params: Connection) => {
     setFlowEdges((prev) => {
+      const sourceType = flowNodesRef.current.find((n) => n.id === params.source)?.data?.nodeType;
+      const targetType = flowNodesRef.current.find((n) => n.id === params.target)?.data?.nodeType;
+      if (sourceType === "tool" && targetType !== "llm") {
+        return prev;
+      }
+      if (targetType === "tool") {
+        return prev;
+      }
       const nextEdges = addEdge(params, prev);
       setGraph((g) => mergeFlow(g, flowNodesRef.current, nextEdges));
       return nextEdges;
@@ -497,10 +516,6 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
   }
 
   async function runTest() {
-    if (!selectedRevId) {
-      setTestErr("Save and select a revision before testing.");
-      return;
-    }
     const parsed = tryParseJsonObject(testInputText);
     if (!parsed.ok) {
       setTestErr("Inputs JSON must be a valid JSON object.");
@@ -512,12 +527,29 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
     setTestRunId("");
     setTestBusy(true);
     try {
+      let revisionId = selectedRevId;
+      if (!revisionId) {
+        const spec = buildEnvelope(graph);
+        const validation = await api(props.backend).validateSpec({ spec });
+        setIssues(validation.issues);
+        if (!validation.ok || validation.issues.length > 0) {
+          setTestErr("Fix validation issues before testing.");
+          return;
+        }
+        const res = await api(props.backend).createAgentRevision({
+          name: name.trim() || "Visual agent",
+          spec_json: spec,
+        });
+        await refreshRevisions();
+        setSelectedRevId(res.id);
+        revisionId = res.id;
+      }
       const llmConnection = buildLlmConnectionPayload(
         props.settings.llmProvider,
         props.settings.llmConnections[props.settings.llmProvider],
       );
       const res = await api(props.backend).createRun({
-        agent_revision_id: selectedRevId,
+        agent_revision_id: revisionId,
         inputs_json: parsed.value,
         tags_json: {},
         group_id: null,
@@ -643,7 +675,6 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
             {selectedNode ? (
               <NodeInspector
                 node={selectedNode}
-                graph={graph}
                 issues={issuesByNodeId.get(selectedNode.id) ?? []}
                 onChange={updateNode}
                 onDelete={deleteNode}
@@ -836,40 +867,50 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
       </div>
 
       <div className="asEditorFooter">
-        <div className="asCard">
-          <div className="asCardHeader">
-            <div className="asCardTitle">Test agent</div>
-          </div>
-          <div className="asCardBody asStack">
-            <label className="asField">
-              <div className="asFieldLabel">Inputs JSON</div>
-              <textarea
-                className="asTextarea"
-                rows={5}
-                value={testInputText}
-                onChange={(e) => setTestInputText(e.currentTarget.value)}
-              />
-            </label>
-            <div className="asRow">
-              <button className="asBtn primary" onClick={runTest} disabled={testBusy || !selectedRevId}>
-                {testBusy ? "Running..." : "Run test"}
-              </button>
-              <button
-                className="asBtn"
-                onClick={cancelTestRun}
-                disabled={!testRunId || !["queued", "running", "starting"].includes(testStatus)}
-              >
-                Cancel
-              </button>
-              {testStatus ? <div className="asMuted">Status: {testStatus}</div> : null}
-              {testRunId ? <div className="asMuted">Run ID: {testRunId.slice(0, 8)}</div> : null}
+        <div className="asEditorFooterGrid">
+          <div className="asCard">
+            <div className="asCardHeader">
+              <div className="asCardTitle">Test agent</div>
             </div>
-            {testErr ? <div className="asIssueItem asCanvasErrorText">{testErr}</div> : null}
-            <label className="asField">
-              <div className="asFieldLabel">Final output</div>
-              <textarea className="asTextarea" rows={6} value={testOutput} readOnly />
-            </label>
+            <div className="asCardBody asStack">
+              <label className="asField">
+                <div className="asFieldLabel">Inputs JSON</div>
+                <textarea
+                  className="asTextarea"
+                  rows={5}
+                  value={testInputText}
+                  onChange={(e) => setTestInputText(e.currentTarget.value)}
+                />
+              </label>
+              <div className="asRow">
+                <button className="asBtn primary" onClick={runTest} disabled={testBusy}>
+                  {testBusy ? "Running..." : "Run test"}
+                </button>
+                <button
+                  className="asBtn"
+                  onClick={cancelTestRun}
+                  disabled={!testRunId || !["queued", "running", "starting"].includes(testStatus)}
+                >
+                  Cancel
+                </button>
+                {testStatus ? <div className="asMuted">Status: {testStatus}</div> : null}
+                {testRunId ? <div className="asMuted">Run ID: {testRunId.slice(0, 8)}</div> : null}
+              </div>
+              {testErr ? <div className="asIssueItem asCanvasErrorText">{testErr}</div> : null}
+              <label className="asField">
+                <div className="asFieldLabel">Final output</div>
+                <textarea className="asTextarea" rows={6} value={testOutput} readOnly />
+              </label>
+            </div>
           </div>
+          <TraceViewer
+            backend={props.backend}
+            runId={testRunId || null}
+            mode="stream"
+            emptyMessage="Run a test to stream events here."
+            waitingMessage="Waiting for events…"
+            title="Test trace"
+          />
         </div>
       </div>
 
@@ -914,7 +955,6 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
 
 function NodeInspector(props: {
   node: AgentNode;
-  graph: AgentGraphDocV1;
   issues: ValidationIssue[];
   onChange: (node: AgentNode) => void;
   onDelete: (nodeId: string) => void;
@@ -922,7 +962,7 @@ function NodeInspector(props: {
   currentAgentName: string;
   settings: AppSettings;
 }) {
-  const { node, graph, issues, onChange, onDelete, revisions, currentAgentName, settings } = props;
+  const { node, issues, onChange, onDelete, revisions, currentAgentName, settings } = props;
   const [schemaText, setSchemaText] = useState(() =>
     node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
   );
@@ -933,7 +973,6 @@ function NodeInspector(props: {
     }
   }, [node]);
 
-  const toolOptions = useMemo(() => graph.nodes.filter((n): n is ToolNode => n.type === "tool"), [graph.nodes]);
   const revisionsByAgent = useMemo(() => {
     const map = new Map<string, AgentRevisionResponse[]>();
     for (const rev of revisions ?? []) {
@@ -1023,7 +1062,18 @@ function NodeInspector(props: {
       ) : null}
       <label className="asField">
         <div className="asFieldLabel">Name</div>
-        <input className="asInput" value={node.name ?? ""} onChange={(e) => onChange({ ...node, name: e.currentTarget.value })} />
+        <input
+          className="asInput"
+          value={node.name ?? ""}
+          onChange={(e) => {
+            const nextName = e.currentTarget.value;
+            if (node.type === "tool") {
+              onChange({ ...node, name: nextName, tool_name: nextName });
+            } else {
+              onChange({ ...node, name: nextName });
+            }
+          }}
+        />
       </label>
 
       {node.type === "llm" ? (
@@ -1068,24 +1118,6 @@ function NodeInspector(props: {
             </select>
           </label>
           <label className="asField">
-            <div className="asFieldLabel">Tools</div>
-            <select
-              className="asSelect"
-              multiple
-              value={node.tools ?? []}
-              onChange={(e) => {
-                const values = Array.from(e.currentTarget.selectedOptions).map((o) => o.value);
-                updateLLM({ tools: values });
-              }}
-            >
-              {toolOptions.map((tool) => (
-                <option key={tool.id} value={tool.id}>
-                  {tool.tool_name} · {tool.id.slice(0, 8)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="asField">
             <div className="asFieldLabel">Temperature</div>
             <input
               className="asInput"
@@ -1101,12 +1133,18 @@ function NodeInspector(props: {
       {node.type === "tool" ? (
         <>
           <label className="asField">
-            <div className="asFieldLabel">Tool name</div>
-            <input className="asInput" value={node.tool_name} onChange={(e) => updateTool({ tool_name: e.currentTarget.value })} />
+            <div className="asFieldLabel">Language</div>
+            <select className="asSelect" value={node.language ?? "python"} onChange={(e) => updateTool({ language: e.currentTarget.value })}>
+              <option value="python">Python</option>
+            </select>
           </label>
           <label className="asField">
             <div className="asFieldLabel">Description</div>
             <textarea className="asTextarea" rows={4} value={node.description ?? ""} onChange={(e) => updateTool({ description: e.currentTarget.value })} />
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Code</div>
+            <textarea className="asTextarea" rows={8} value={node.code ?? ""} onChange={(e) => updateTool({ code: e.currentTarget.value })} />
           </label>
           <label className="asField">
             <div className="asFieldLabel">Schema JSON</div>

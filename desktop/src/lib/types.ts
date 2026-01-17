@@ -107,6 +107,8 @@ export type LLMNode = NodeBase & {
 export type ToolNode = NodeBase & {
   type: "tool";
   tool_name: string;
+  language?: string;
+  code?: string;
   schema?: Record<string, unknown>;
   description?: string | null;
 };

@@ -56,6 +56,8 @@ class LLMNode(NodeBase):
 class ToolNode(NodeBase):
     type: Literal["tool"]
     tool_name: str
+    language: str = "python"
+    code: str = ""
     # Use `schema_` to avoid colliding with Pydantic's BaseModel.schema() API.
     # Keep JSON compatibility by aliasing to "schema".
     schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")

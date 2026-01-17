@@ -65,6 +65,27 @@ def validate_graph(doc: AgentGraphDocV1) -> list[ValidationIssue]:
                 )
 
     tool_nodes = {n.id: n for n in doc.nodes if isinstance(n, ToolNode)}
+    tool_name_map: dict[str, ToolNode] = {}
+    for tool in tool_nodes.values():
+        tool_name = tool.tool_name.strip()
+        if tool_name in tool_name_map:
+            issues.append(
+                ValidationIssue(
+                    code="tool.duplicate_name",
+                    message="Tool name must be unique.",
+                    node_id=tool.id,
+                )
+            )
+        else:
+            tool_name_map[tool_name] = tool
+        if tool.schema_ and tool.schema_.get("type") not in (None, "object"):
+            issues.append(
+                ValidationIssue(
+                    code="tool.invalid_schema",
+                    message="Tool schema must be a JSON object schema.",
+                    node_id=tool.id,
+                )
+            )
     for node in llm_nodes:
         for tool_id in node.tools:
             if tool_id not in tool_nodes:
@@ -73,6 +94,16 @@ def validate_graph(doc: AgentGraphDocV1) -> list[ValidationIssue]:
                         code="llm.missing_tool",
                         message="LLM references a tool that does not exist.",
                         node_id=node.id,
+                    )
+                )
+                continue
+            tool = tool_nodes[tool_id]
+            if not tool.code.strip():
+                issues.append(
+                    ValidationIssue(
+                        code="tool.missing_code",
+                        message="Tool must include executable code.",
+                        node_id=tool.id,
                     )
                 )
 
@@ -94,6 +125,8 @@ def compile_to_spec(doc: AgentGraphDocV1) -> dict[str, Any]:
                 "name": tool.tool_name,
                 "description": tool.description,
                 "schema": tool.schema_,
+                "language": tool.language,
+                "code": tool.code,
             }
         )
 
