@@ -3,6 +3,8 @@ import "./App.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentRevisionResponse,
+  AgentSpecEnvelope,
+  AgentNode,
   HealthResponse,
   RunCreateRequest,
   RunEventResponse,
@@ -12,8 +14,9 @@ import { api, type BackendConfig } from "./lib/api";
 import { diffLines } from "./lib/diff";
 import { loadSettings, saveSettings, type AppSettings } from "./lib/storage";
 import { formatDateTime, formatDurationMs, prettyJson, tryParseJsonObject } from "./lib/json";
+import { AgentEditorPage } from "./pages/AgentEditorPage";
 
-type Route = "revisions" | "run" | "trace" | "dashboard" | "settings";
+type Route = "revisions" | "editor" | "run" | "trace" | "dashboard" | "settings";
 
 function App() {
   const [route, setRoute] = useState<Route>("revisions");
@@ -72,6 +75,7 @@ function App() {
 
         <nav className="asNav">
           <NavItem active={route === "revisions"} onClick={() => setRoute("revisions")} label="Prompt revisions" />
+          <NavItem active={route === "editor"} onClick={() => setRoute("editor")} label="Agent editor" />
           <NavItem active={route === "run"} onClick={() => setRoute("run")} label="Run launcher" />
           <NavItem active={route === "trace"} onClick={() => setRoute("trace")} label="Live trace" />
           <NavItem active={route === "dashboard"} onClick={() => setRoute("dashboard")} label="Dashboard" />
@@ -104,6 +108,7 @@ function App() {
         ) : null}
 
         {route === "revisions" ? <RevisionsPage backend={backend} onStartRun={(runId) => setRecentRunIds((s) => uniq([runId, ...s]))} /> : null}
+        {route === "editor" ? <AgentEditorPage backend={backend} /> : null}
         {route === "run" ? (
           <RunLauncherPage backend={backend} recentRunIds={recentRunIds} setRecentRunIds={setRecentRunIds} />
         ) : null}
@@ -277,6 +282,12 @@ function RevisionsPage(props: { backend: BackendConfig; onStartRun: (runId: stri
     return diffLines(a, b);
   }, [selected, compare]);
 
+  const semanticDiff = useMemo(() => {
+    if (!selected || !compare) return null;
+    if (!isGraphEnvelope(selected.spec_json) || !isGraphEnvelope(compare.spec_json)) return null;
+    return diffGraph(compare.spec_json, selected.spec_json);
+  }, [selected, compare]);
+
   return (
     <div className="asGrid2">
       <div className="asCol">
@@ -395,6 +406,16 @@ function RevisionsPage(props: { backend: BackendConfig; onStartRun: (runId: stri
                     ))}
                 </select>
               </Field>
+              {semanticDiff && semanticDiff.length > 0 ? (
+                <div className="asStack">
+                  {semanticDiff.map((item, idx) => (
+                    <div key={`${item.kind}-${idx}`} className={`asDiffLine ${item.kind}`}>
+                      <span className="asDiffGlyph">{item.kind === "add" ? "+" : item.kind === "del" ? "-" : "~"}</span>
+                      <span>{item.text}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
               {diffText ? (
                 <pre className="asDiff">
                   {diffText.map((d, idx) => (
@@ -819,6 +840,70 @@ function EventRow(props: { ev: RunEventResponse }) {
       <pre className="asEventPayload">{payload}</pre>
     </details>
   );
+}
+
+function isGraphEnvelope(value: unknown): value is AgentSpecEnvelope {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as AgentSpecEnvelope;
+  return v.schema_version === "graph-v1" && !!v.graph && Array.isArray(v.graph.nodes);
+}
+
+function diffGraph(
+  a: AgentSpecEnvelope,
+  b: AgentSpecEnvelope,
+): Array<{ kind: "add" | "del" | "mod"; text: string }> {
+  const out: Array<{ kind: "add" | "del" | "mod"; text: string }> = [];
+  const aNodes = new Map(a.graph.nodes.map((n) => [n.id, n]));
+  const bNodes = new Map(b.graph.nodes.map((n) => [n.id, n]));
+
+  for (const [id, node] of aNodes) {
+    if (!bNodes.has(id)) {
+      out.push({ kind: "del", text: `Removed node ${node.type} (${id})` });
+    }
+  }
+  for (const [id, node] of bNodes) {
+    if (!aNodes.has(id)) {
+      out.push({ kind: "add", text: `Added node ${node.type} (${id})` });
+    }
+  }
+
+  for (const [id, node] of bNodes) {
+    const prev = aNodes.get(id);
+    if (!prev) continue;
+    if (prev.type !== node.type) {
+      out.push({ kind: "mod", text: `Node ${id} type changed ${prev.type} → ${node.type}` });
+      continue;
+    }
+    if (prev.name !== node.name) {
+      out.push({ kind: "mod", text: `Node ${id} name changed` });
+    }
+    if (node.type === "llm") {
+      const prevModel = JSON.stringify((prev as AgentNode & { model?: unknown }).model ?? {});
+      const nextModel = JSON.stringify((node as AgentNode & { model?: unknown }).model ?? {});
+      if (prevModel !== nextModel) out.push({ kind: "mod", text: `LLM ${id} model updated` });
+      const prevPrompt = (prev as AgentNode & { system_prompt?: string }).system_prompt ?? "";
+      const nextPrompt = (node as AgentNode & { system_prompt?: string }).system_prompt ?? "";
+      if (prevPrompt !== nextPrompt) out.push({ kind: "mod", text: `LLM ${id} system prompt changed` });
+    }
+    if (node.type === "tool") {
+      const prevName = (prev as AgentNode & { tool_name?: string }).tool_name ?? "";
+      const nextName = (node as AgentNode & { tool_name?: string }).tool_name ?? "";
+      if (prevName !== nextName) out.push({ kind: "mod", text: `Tool ${id} name changed` });
+    }
+  }
+
+  const edgeKey = (e: { source: string; target: string; label?: string | null }) =>
+    `${e.source}::${e.target}::${e.label ?? ""}`;
+  const aEdges = new Set(a.graph.edges.map(edgeKey));
+  const bEdges = new Set(b.graph.edges.map(edgeKey));
+  for (const key of aEdges) {
+    if (!bEdges.has(key)) out.push({ kind: "del", text: `Removed edge ${key}` });
+  }
+  for (const key of bEdges) {
+    if (!aEdges.has(key)) out.push({ kind: "add", text: `Added edge ${key}` });
+  }
+
+  return out;
 }
 
 function uniq(ids: string[]): string[] {

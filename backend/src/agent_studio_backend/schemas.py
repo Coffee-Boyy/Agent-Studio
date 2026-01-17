@@ -6,6 +6,8 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 from pydantic import ConfigDict
 
+from agent_studio_backend.agent_spec import AgentSpecEnvelope, ValidationIssue
+
 
 class HealthResponse(BaseModel):
     ok: bool = True
@@ -61,4 +63,18 @@ class RunEventResponse(BaseModel):
     seq: int
     type: str
     payload_json: dict[str, Any]
+
+
+class SpecValidateRequest(BaseModel):
+    spec: AgentSpecEnvelope
+
+
+class SpecValidateResponse(BaseModel):
+    ok: bool
+    issues: list[ValidationIssue]
+    normalized: AgentSpecEnvelope
+
+
+class SpecCompileResponse(BaseModel):
+    compiled: dict[str, Any]
 

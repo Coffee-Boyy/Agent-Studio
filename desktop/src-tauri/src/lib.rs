@@ -83,6 +83,7 @@ fn spawn_backend_process() -> Result<Child, String> {
     let mut child = c
         .env("AGENT_STUDIO_ALLOW_CORS_ORIGINS", allow_origins)
         .env("PYTHONUNBUFFERED", "1")
+        .current_dir("../../backend")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

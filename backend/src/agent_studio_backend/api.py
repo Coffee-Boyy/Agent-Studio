@@ -19,7 +19,11 @@ from agent_studio_backend.schemas import (
     RunCreateRequest,
     RunEventResponse,
     RunResponse,
+  SpecCompileResponse,
+  SpecValidateRequest,
+  SpecValidateResponse,
 )
+from agent_studio_backend.services.compiler import compile_to_spec, validate_graph
 from agent_studio_backend.services.event_bus import EVENT_BUS
 from agent_studio_backend.services.revisions import REVISIONS
 from agent_studio_backend.services.runs import RUNS, sse_format
@@ -48,6 +52,18 @@ if origins:
 @app.get("/v1/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(ok=True)
+
+
+@app.post("/v1/spec/validate", response_model=SpecValidateResponse)
+def validate_spec(req: SpecValidateRequest) -> SpecValidateResponse:
+    issues = validate_graph(req.spec.graph)
+    return SpecValidateResponse(ok=not issues, issues=issues, normalized=req.spec)
+
+
+@app.post("/v1/spec/compile", response_model=SpecCompileResponse)
+def compile_spec(req: SpecValidateRequest) -> SpecCompileResponse:
+    compiled = compile_to_spec(req.spec.graph)
+    return SpecCompileResponse(compiled=compiled)
 
 
 @app.post("/v1/agent-revisions", response_model=AgentRevisionResponse)

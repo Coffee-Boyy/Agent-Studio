@@ -5,6 +5,9 @@ import type {
   RunCreateRequest,
   RunEventResponse,
   RunResponse,
+  SpecCompileResponse,
+  SpecValidateRequest,
+  SpecValidateResponse,
 } from "./types";
 
 export type BackendConfig = { baseUrl: string };
@@ -79,6 +82,14 @@ export function api(cfg: BackendConfig) {
         `/v1/runs/${encodeURIComponent(runId)}/events?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
       );
       return fetchJson(url);
+    },
+
+    async validateSpec(req: SpecValidateRequest): Promise<SpecValidateResponse> {
+      return fetchJson(joinUrl(cfg.baseUrl, "/v1/spec/validate"), { method: "POST", body: JSON.stringify(req) });
+    },
+
+    async compileSpec(req: SpecValidateRequest): Promise<SpecCompileResponse> {
+      return fetchJson(joinUrl(cfg.baseUrl, "/v1/spec/compile"), { method: "POST", body: JSON.stringify(req) });
     },
   };
 }
