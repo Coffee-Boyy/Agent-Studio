@@ -125,14 +125,35 @@ export function TraceViewer(props: {
 
 function EventRow(props: { ev: RunEventResponse }) {
   const payload = useMemo(() => prettyJson(props.ev.payload_json), [props.ev.payload_json]);
+  const eventName = useMemo(() => extractEventName(props.ev.payload_json), [props.ev.payload_json]);
   return (
     <details className="asEvent">
       <summary className="asEventSummary">
         <span className="asEventSeq asMono">{String(props.ev.seq).padStart(4, "0")}</span>
-        <span className="asEventType asMono">{props.ev.type}</span>
+        <span className="asEventType">
+          <span className="asMono">{props.ev.type}</span>
+          {eventName ? <span className="asMuted"> · {eventName}</span> : null}
+        </span>
         <span className="asEventTime">{formatDateTime(props.ev.created_at)}</span>
       </summary>
       <pre className="asEventPayload">{payload}</pre>
     </details>
   );
+}
+
+function extractEventName(payload: Record<string, unknown> | null | undefined): string | null {
+  if (!payload) return null;
+  const directName = payload.name;
+  if (typeof directName === "string" && directName.trim()) return directName.trim();
+  const newAgent = payload.new_agent;
+  if (newAgent && typeof newAgent === "object" && "name" in newAgent) {
+    const nestedName = (newAgent as { name?: unknown }).name;
+    if (typeof nestedName === "string" && nestedName.trim()) return nestedName.trim();
+  }
+  const agent = payload.agent;
+  if (agent && typeof agent === "object" && "name" in agent) {
+    const nestedName = (agent as { name?: unknown }).name;
+    if (typeof nestedName === "string" && nestedName.trim()) return nestedName.trim();
+  }
+  return null;
 }

@@ -667,6 +667,9 @@ body,
   margin-top: 14px;
   grid-column: 1 / -1;
 }
+.asEditorWide {
+  grid-column: 1 / -1;
+}
 .asEditorFooterGrid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -877,6 +880,9 @@ body,
 .asFlowNode.type-llm {
   border-left: 4px solid rgba(100, 108, 255, 0.95);
 }
+.asFlowNode.type-code_editor {
+  border-left: 4px solid rgba(14, 165, 233, 0.95);
+}
 .asFlowNode.type-tool {
   border-left: 4px solid rgba(34, 197, 94, 0.9);
 }
@@ -915,6 +921,9 @@ body,
 }
 .asPaletteBtn.type-llm {
   border-left-color: rgba(100, 108, 255, 0.95);
+}
+.asPaletteBtn.type-code_editor {
+  border-left-color: rgba(14, 165, 233, 0.95);
 }
 .asPaletteBtn.type-tool {
   border-left-color: rgba(34, 197, 94, 0.9);

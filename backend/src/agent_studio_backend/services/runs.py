@@ -186,6 +186,7 @@ class RunService:
 
         try:
             output = await self._executor.run(
+                run_id=run_id,
                 spec_json=spec_json,
                 inputs_json=inputs_json,
                 llm_connection=llm_connection,

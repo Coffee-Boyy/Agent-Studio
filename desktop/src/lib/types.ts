@@ -104,6 +104,14 @@ export type LLMNode = NodeBase & {
   temperature?: number | null;
 };
 
+export type CodeEditorNode = NodeBase & {
+  type: "code_editor";
+  system_prompt?: string;
+  model?: Record<string, unknown>;
+  tools?: string[];
+  temperature?: number | null;
+};
+
 export type ToolNode = NodeBase & {
   type: "tool";
   tool_name: string;
@@ -139,6 +147,7 @@ export type AgentNode =
   | InputNode
   | OutputNode
   | LLMNode
+  | CodeEditorNode
   | ToolNode
   | GuardrailNode
   | RouterNode

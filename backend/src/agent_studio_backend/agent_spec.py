@@ -53,6 +53,14 @@ class LLMNode(NodeBase):
     temperature: Optional[float] = None
 
 
+class CodeEditorNode(NodeBase):
+    type: Literal["code_editor"]
+    system_prompt: str = ""
+    model: dict[str, Any] = Field(default_factory=dict)
+    tools: list[str] = Field(default_factory=list)
+    temperature: Optional[float] = None
+
+
 class ToolNode(NodeBase):
     type: Literal["tool"]
     tool_name: str
@@ -89,6 +97,7 @@ AgentNode = Union[
     InputNode,
     OutputNode,
     LLMNode,
+    CodeEditorNode,
     ToolNode,
     GuardrailNode,
     RouterNode,

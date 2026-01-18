@@ -4,7 +4,14 @@ import inspect
 import json
 from typing import Any, Callable
 
-from agents import FunctionTool, ToolContext
+try:
+    from agents import FunctionTool, ToolContext
+except ImportError:  # pragma: no cover - compatibility for newer agents API
+    from agents import FunctionTool
+    try:
+        from agents.tool_context import ToolContext  # type: ignore
+    except Exception:
+        ToolContext = Any  # type: ignore[misc,assignment]
 
 ToolCallable = Callable[..., Any]
 

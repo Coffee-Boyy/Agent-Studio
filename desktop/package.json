@@ -37,6 +37,16 @@
     "directories": {
       "output": "release"
     },
+    "extraResources": [
+      {
+        "from": "../backend/src/agent_studio_backend",
+        "to": "backend/agent_studio_backend"
+      },
+      {
+        "from": "python",
+        "to": "python"
+      }
+    ],
     "files": [
       "dist/**",
       "electron/**",

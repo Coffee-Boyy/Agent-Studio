@@ -5,6 +5,7 @@ from typing import Any
 from agent_studio_backend.agent_spec import (
     AgentGraphDocV1,
     AgentSpecEnvelope,
+    CodeEditorNode,
     LLMNode,
     ToolNode,
     ValidationIssue,
@@ -50,16 +51,18 @@ def validate_graph(doc: AgentGraphDocV1) -> list[ValidationIssue]:
                 )
             )
 
-    llm_nodes = [n for n in doc.nodes if isinstance(n, LLMNode)]
-    if not llm_nodes:
-        issues.append(ValidationIssue(code="graph.no_llm", message="Graph must include at least one LLM node."))
+    agent_nodes = [n for n in doc.nodes if isinstance(n, (LLMNode, CodeEditorNode))]
+    if not agent_nodes:
+        issues.append(
+            ValidationIssue(code="graph.no_agent", message="Graph must include at least one agent node.")
+        )
     else:
-        for node in llm_nodes:
+        for node in agent_nodes:
             if not node.model:
                 issues.append(
                     ValidationIssue(
-                        code="llm.missing_model",
-                        message="LLM node must include a model definition.",
+                        code="agent.missing_model",
+                        message="Agent node must include a model definition.",
                         node_id=node.id,
                     )
                 )
@@ -86,13 +89,13 @@ def validate_graph(doc: AgentGraphDocV1) -> list[ValidationIssue]:
                     node_id=tool.id,
                 )
             )
-    for node in llm_nodes:
-        for tool_id in node.tools:
+    for node in agent_nodes:
+        for tool_id in _collect_tool_ids(doc, node, tool_nodes):
             if tool_id not in tool_nodes:
                 issues.append(
                     ValidationIssue(
-                        code="llm.missing_tool",
-                        message="LLM references a tool that does not exist.",
+                        code="agent.missing_tool",
+                        message="Agent references a tool that does not exist.",
                         node_id=node.id,
                     )
                 )
@@ -111,12 +114,15 @@ def validate_graph(doc: AgentGraphDocV1) -> list[ValidationIssue]:
 
 
 def compile_to_spec(doc: AgentGraphDocV1) -> dict[str, Any]:
-    llm_nodes = [n for n in doc.nodes if isinstance(n, LLMNode)]
-    primary = llm_nodes[0]
+    agent_nodes = [n for n in doc.nodes if isinstance(n, (LLMNode, CodeEditorNode))]
+    if not agent_nodes:
+        return {"agent": {}, "tools": []}
+    code_editor_nodes = [n for n in agent_nodes if isinstance(n, CodeEditorNode)]
+    primary = code_editor_nodes[0] if code_editor_nodes else agent_nodes[0]
     tool_nodes = {n.id: n for n in doc.nodes if isinstance(n, ToolNode)}
 
     tools: list[dict[str, Any]] = []
-    for tool_id in primary.tools:
+    for tool_id in _collect_tool_ids(doc, primary, tool_nodes):
         tool = tool_nodes.get(tool_id)
         if not tool:
             continue
@@ -132,6 +138,7 @@ def compile_to_spec(doc: AgentGraphDocV1) -> dict[str, Any]:
 
     return {
         "agent": {
+            "type": "code_editor" if isinstance(primary, CodeEditorNode) else "llm",
             "name": primary.name or "Agent",
             "system_prompt": primary.system_prompt,
             "model": primary.model,
@@ -144,3 +151,20 @@ def compile_to_spec(doc: AgentGraphDocV1) -> dict[str, Any]:
 
 def normalize_spec(envelope: AgentSpecEnvelope) -> AgentSpecEnvelope:
     return envelope
+
+
+def _collect_tool_ids(
+    doc: AgentGraphDocV1, node: LLMNode | CodeEditorNode, tool_nodes: dict[str, ToolNode]
+) -> list[str]:
+    tool_ids: list[str] = []
+    seen: set[str] = set()
+    for tool_id in getattr(node, "tools", []) or []:
+        if tool_id in seen:
+            continue
+        seen.add(tool_id)
+        tool_ids.append(tool_id)
+    for edge in doc.edges:
+        if edge.target == node.id and edge.source in tool_nodes and edge.source not in seen:
+            seen.add(edge.source)
+            tool_ids.append(edge.source)
+    return tool_ids

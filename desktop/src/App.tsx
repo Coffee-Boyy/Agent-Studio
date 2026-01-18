@@ -113,7 +113,13 @@ function App() {
           </Banner>
         ) : null}
 
-        {route === "editor" ? <AgentEditorPage backend={backend} settings={settings} /> : null}
+        {route === "editor" ? (
+          <AgentEditorPage
+            backend={backend}
+            settings={settings}
+            onStartRun={(runId) => setRecentRunIds((s) => uniq([runId, ...s]).slice(0, 50))}
+          />
+        ) : null}
         {route === "runner" ? (
           <AgentRunnerPage
             backend={backend}

@@ -8,8 +8,9 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     db_path: str = Field(default="./agent_studio.sqlite", alias="AGENT_STUDIO_DB_PATH")
-    allow_cors_origins: str = Field(default="http://localhost:1420", alias="AGENT_STUDIO_ALLOW_CORS_ORIGINS")
+    allow_cors_origins: str = Field(default="http://localhost:5173", alias="AGENT_STUDIO_ALLOW_CORS_ORIGINS")
     log_level: str = Field(default="info", alias="AGENT_STUDIO_LOG_LEVEL")
+    workspaces_dir: str = Field(default="./workspaces", alias="AGENT_STUDIO_WORKSPACES_DIR")
 
     def cors_origins_list(self) -> list[str]:
         raw = (self.allow_cors_origins or "").strip()

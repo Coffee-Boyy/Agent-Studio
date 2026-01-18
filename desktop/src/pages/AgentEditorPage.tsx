@@ -20,7 +20,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { api, type BackendConfig } from "../lib/api";
-import { prettyJson, tryParseJsonObject } from "../lib/json";
+import { formatDateTime, prettyJson, tryParseJsonObject } from "../lib/json";
 import {
   buildLlmConnectionPayload,
   DEFAULT_LLM_PROVIDER,
@@ -30,13 +30,21 @@ import {
   MODEL_OPTIONS,
   type LlmProvider,
 } from "../lib/llm";
-import { loadAgentDraft, saveAgentDraft, type AppSettings } from "../lib/storage";
+import {
+  loadAgentDraft,
+  loadTestRunsForRevision,
+  saveAgentDraft,
+  saveTestRunForRevision,
+  type AppSettings,
+  type TestRunEntry,
+} from "../lib/storage";
 import type {
   AgentGraphDocV1,
   AgentNode,
   AgentRevisionCreateRequest,
   AgentRevisionResponse,
   AgentSpecEnvelope,
+  CodeEditorNode,
   LLMNode,
   ToolNode,
   ValidationIssue,
@@ -110,6 +118,23 @@ function formatRelativeTime(isoTime: string): string {
   return rtf.format(0, "second");
 }
 
+function formatInputPreview(inputs: Record<string, unknown>): string {
+  const rawInput = inputs?.input;
+  let preview = "";
+  if (typeof rawInput === "string") {
+    preview = rawInput;
+  } else {
+    try {
+      preview = JSON.stringify(inputs);
+    } catch {
+      preview = "[unserializable inputs]";
+    }
+  }
+  const singleLine = preview.replace(/\s+/g, " ").trim();
+  if (!singleLine) return "";
+  return singleLine.length > 120 ? `${singleLine.slice(0, 117)}...` : singleLine;
+}
+
 function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, ValidationIssue[]>): Node[] {
   return graph.nodes.map((n) => ({
     id: n.id,
@@ -167,6 +192,18 @@ function newNode(type: AgentNode["type"], idx: number): AgentNode {
       name: "LLM",
       position,
       system_prompt: "",
+      model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
+      tools: [],
+      temperature: 0.2,
+    };
+  }
+  if (type === "code_editor") {
+    return {
+      id,
+      type,
+      name: "Code editor",
+      position,
+      system_prompt: "You are a helpful code editor.",
       model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
       tools: [],
       temperature: 0.2,
@@ -292,7 +329,11 @@ function AgentFlowNode(props: { data: { label: string; nodeType: string; name: s
   );
 }
 
-export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSettings }) {
+export function AgentEditorPage(props: {
+  backend: BackendConfig;
+  settings: AppSettings;
+  onStartRun: (runId: string) => void;
+}) {
   const graphState = useUndoRedoState<AgentGraphDocV1>(() => {
     const draft = loadAgentDraft();
     if (draft && draft.schema_version === "graph-v1") {
@@ -312,10 +353,11 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [jsonModal, setJsonModal] = useState<null | { text: string }>(null);
-  const [testInputText, setTestInputText] = useState('{"input": ""}');
+  const [testInputText, setTestInputText] = useState('{"input": "Create a simple HTML page"}');
   const [testOutput, setTestOutput] = useState("");
   const [testStatus, setTestStatus] = useState("");
   const [testRunId, setTestRunId] = useState("");
+  const [testRunHistory, setTestRunHistory] = useState<TestRunEntry[]>([]);
   const [testErr, setTestErr] = useState<string | null>(null);
   const [testBusy, setTestBusy] = useState(false);
   const [contextMenu, setContextMenu] = useState<
@@ -393,6 +435,14 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
     loadRevision(first.id);
   }, [revs, selectedRevId]);
 
+  useEffect(() => {
+    if (!selectedRevId) {
+      setTestRunHistory([]);
+      return;
+    }
+    setTestRunHistory(loadTestRunsForRevision(selectedRevId));
+  }, [selectedRevId]);
+
   const onNodesChange: OnNodesChange = useCallback((changes) => {
     setFlowNodes((prev) => {
       const next = applyNodeChanges(changes, prev);
@@ -421,7 +471,8 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
     setFlowEdges((prev) => {
       const sourceType = flowNodesRef.current.find((n) => n.id === params.source)?.data?.nodeType;
       const targetType = flowNodesRef.current.find((n) => n.id === params.target)?.data?.nodeType;
-      if (sourceType === "tool" && targetType !== "llm") {
+      const isAgentTarget = targetType === "llm" || targetType === "code_editor";
+      if (sourceType === "tool" && !isAgentTarget) {
         return prev;
       }
       if (targetType === "tool") {
@@ -557,6 +608,13 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
       });
       setTestRunId(res.id);
       setTestStatus(res.status);
+      props.onStartRun(res.id);
+      const entry = {
+        id: res.id,
+        created_at: new Date().toISOString(),
+        inputs_json: parsed.value,
+      };
+      setTestRunHistory(saveTestRunForRevision(revisionId, entry));
       let latest = res;
       while (latest && !latest.ended_at && !["completed", "failed", "cancelled"].includes(latest.status)) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -592,6 +650,10 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
     } catch (e) {
       setTestErr(e instanceof Error ? e.message : String(e));
     }
+  }
+
+  function recallTestInputs(entry: TestRunEntry) {
+    setTestInputText(prettyJson(entry.inputs_json ?? {}));
   }
 
   function addNode(type: AgentNode["type"]) {
@@ -728,6 +790,9 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
             </button>
             <button className="asBtn asPaletteBtn type-llm" onClick={() => addNode("llm")}>
               + LLM
+            </button>
+            <button className="asBtn asPaletteBtn type-code_editor" onClick={() => addNode("code_editor")}>
+              + Code editor
             </button>
             <button className="asBtn asPaletteBtn type-tool" onClick={() => addNode("tool")}>
               + Tool
@@ -866,6 +931,41 @@ export function AgentEditorPage(props: { backend: BackendConfig; settings: AppSe
         </div>
       </div>
 
+      <div className="asCard asEditorWide">
+        <div className="asCardHeader">
+          <div className="asCardTitle">Recent test runs</div>
+          {selectedRevId ? <div className="asMuted asSmall">Revision {selectedRevId.slice(0, 8)}</div> : null}
+        </div>
+        <div className="asCardBody">
+          {!selectedRevId ? (
+            <div className="asMuted">Save or select a revision to track test runs.</div>
+          ) : testRunHistory.length === 0 ? (
+            <div className="asMuted">No test runs yet for this revision.</div>
+          ) : (
+            <div className="asTable">
+              <div className="asTableHead">
+                <div>Run</div>
+                <div>Started</div>
+                <div>Input</div>
+                <div></div>
+              </div>
+              {testRunHistory.map((entry) => (
+                <div key={entry.id} className="asTableRow">
+                  <div className="asMono">{entry.id.slice(0, 8)}</div>
+                  <div>{formatDateTime(entry.created_at)}</div>
+                  <div className="asMuted">{formatInputPreview(entry.inputs_json)}</div>
+                  <div>
+                    <button className="asBtn sm" onClick={() => recallTestInputs(entry)}>
+                      Use inputs
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
       <div className="asEditorFooter">
         <div className="asEditorFooterGrid">
           <div className="asCard">
@@ -966,6 +1066,7 @@ function NodeInspector(props: {
   const [schemaText, setSchemaText] = useState(() =>
     node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
   );
+  const isModelNode = node.type === "llm" || node.type === "code_editor";
 
   useEffect(() => {
     if (node.type === "tool") {
@@ -992,19 +1093,19 @@ function NodeInspector(props: {
     node.type === "subagent" && node.agent_name ? revisionsByAgent.get(node.agent_name) ?? [] : [];
 
   const modelProvider = useMemo<LlmProvider>(() => {
-    if (node.type !== "llm") return settings.llmProvider;
+    if (!isModelNode) return settings.llmProvider;
     const model = node.model ?? {};
     if (typeof model !== "object" || Array.isArray(model) || !model) return settings.llmProvider;
     const provider = (model as { provider?: unknown }).provider;
     return isLlmProvider(provider) ? provider : settings.llmProvider;
-  }, [node, settings.llmProvider]);
+  }, [node, settings.llmProvider, isModelNode]);
 
   const modelName = useMemo(() => {
-    if (node.type !== "llm") return "";
+    if (!isModelNode) return "";
     const model = node.model ?? {};
     if (typeof model !== "object" || Array.isArray(model) || !model) return "";
     return typeof (model as { name?: unknown }).name === "string" ? ((model as { name?: string }).name ?? "") : "";
-  }, [node]);
+  }, [node, isModelNode]);
 
   const modelOptions = useMemo(() => {
     const base = MODEL_OPTIONS[modelProvider] ?? [];
@@ -1019,13 +1120,13 @@ function NodeInspector(props: {
   }, [modelProvider, modelName, settings.llmConnections]);
 
   function updateLlmModel(nextProvider: LlmProvider, nextName: string) {
-    if (node.type !== "llm") return;
+    if (!isModelNode) return;
     const nextModel = {
       ...(node.model as Record<string, unknown> | undefined),
       provider: nextProvider,
       name: nextName,
     };
-    updateLLM({ model: nextModel });
+    updateModelNode({ model: nextModel });
   }
 
   useEffect(() => {
@@ -1039,8 +1140,8 @@ function NodeInspector(props: {
     }
   }, [node, onChange, revisionsByAgent]);
 
-  function updateLLM(next: Partial<LLMNode>) {
-    if (node.type !== "llm") return;
+  function updateModelNode(next: Partial<LLMNode | CodeEditorNode>) {
+    if (!isModelNode) return;
     onChange({ ...node, ...next });
   }
 
@@ -1076,11 +1177,16 @@ function NodeInspector(props: {
         />
       </label>
 
-      {node.type === "llm" ? (
+      {isModelNode ? (
         <>
           <label className="asField">
             <div className="asFieldLabel">System prompt</div>
-            <textarea className="asTextarea" rows={6} value={node.system_prompt ?? ""} onChange={(e) => updateLLM({ system_prompt: e.currentTarget.value })} />
+            <textarea
+              className="asTextarea"
+              rows={6}
+              value={node.system_prompt ?? ""}
+              onChange={(e) => updateModelNode({ system_prompt: e.currentTarget.value })}
+            />
           </label>
           <label className="asField">
             <div className="asFieldLabel">Provider</div>
@@ -1124,7 +1230,7 @@ function NodeInspector(props: {
               type="number"
               step="0.1"
               value={node.temperature ?? 0}
-              onChange={(e) => updateLLM({ temperature: Number(e.currentTarget.value) })}
+              onChange={(e) => updateModelNode({ temperature: Number(e.currentTarget.value) })}
             />
           </label>
         </>
