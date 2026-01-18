@@ -257,7 +257,10 @@ def _build_tools_for_agent(
         if tool_id in tool_nodes
     ]
     if isinstance(node, CodeEditorNode):
-        tools.extend(build_workspace_tools(run_workspace))
+        workspace_root = run_workspace
+        if node.workspace_root:
+            workspace_root = Path(node.workspace_root).expanduser()
+        tools.extend(build_workspace_tools(workspace_root))
     return tools
 
 

@@ -59,6 +59,7 @@ class CodeEditorNode(NodeBase):
     model: dict[str, Any] = Field(default_factory=dict)
     tools: list[str] = Field(default_factory=list)
     temperature: Optional[float] = None
+    workspace_root: Optional[str] = None
 
 
 class ToolNode(NodeBase):

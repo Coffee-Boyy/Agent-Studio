@@ -132,6 +132,18 @@ def get_run(run_id: str) -> RunResponse:
         return RunResponse.model_validate(run)
 
 
+@app.get("/v1/runs", response_model=list[RunResponse])
+def list_runs(revision_id: Optional[str] = None, limit: int = 100, offset: int = 0) -> list[RunResponse]:
+    with Session(ENGINE) as session:
+        runs = RUNS.list_runs(
+            session,
+            revision_id=revision_id,
+            limit=min(limit, 500),
+            offset=max(offset, 0),
+        )
+        return [RunResponse.model_validate(r) for r in runs]
+
+
 @app.post("/v1/runs/{run_id}/cancel")
 def cancel_run(run_id: str) -> dict[str, Any]:
     with Session(ENGINE) as session:

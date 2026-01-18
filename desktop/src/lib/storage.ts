@@ -17,7 +17,6 @@ export type AppSettings = {
 
 const KEY = "agent_studio.settings.v1";
 const EDITOR_DRAFT_KEY = "agent_studio.editor_draft.v1";
-const EDITOR_TEST_RUNS_KEY = "agent_studio.editor_test_runs.v1";
 
 export type TestRunEntry = {
   id: string;
@@ -60,54 +59,6 @@ export function loadAgentDraft(): Record<string, unknown> | null {
 
 export function saveAgentDraft(draft: Record<string, unknown>): void {
   localStorage.setItem(EDITOR_DRAFT_KEY, JSON.stringify(draft));
-}
-
-export function loadTestRunsForRevision(revisionId: string): TestRunEntry[] {
-  if (!revisionId) return [];
-  const history = loadTestRunHistory();
-  return history[revisionId] ?? [];
-}
-
-export function saveTestRunForRevision(
-  revisionId: string,
-  entry: TestRunEntry,
-  maxEntries: number = 20,
-): TestRunEntry[] {
-  if (!revisionId) return [];
-  const history = loadTestRunHistory();
-  const existing = history[revisionId] ?? [];
-  const next = [entry, ...existing.filter((it) => it.id !== entry.id)].slice(0, maxEntries);
-  history[revisionId] = next;
-  localStorage.setItem(EDITOR_TEST_RUNS_KEY, JSON.stringify(history));
-  return next;
-}
-
-function loadTestRunHistory(): Record<string, TestRunEntry[]> {
-  try {
-    const raw = localStorage.getItem(EDITOR_TEST_RUNS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    const next: Record<string, TestRunEntry[]> = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (!Array.isArray(value)) continue;
-      const entries = value
-        .filter((it) => it && typeof it === "object" && !Array.isArray(it))
-        .map((it) => it as TestRunEntry)
-        .filter(
-          (it) =>
-            typeof it.id === "string" &&
-            typeof it.created_at === "string" &&
-            it.inputs_json &&
-            typeof it.inputs_json === "object" &&
-            !Array.isArray(it.inputs_json),
-        );
-      if (entries.length) next[key] = entries;
-    }
-    return next;
-  } catch {
-    return {};
-  }
 }
 
 function defaults(): AppSettings {

@@ -110,6 +110,7 @@ export type CodeEditorNode = NodeBase & {
   model?: Record<string, unknown>;
   tools?: string[];
   temperature?: number | null;
+  workspace_root?: string;
 };
 
 export type ToolNode = NodeBase & {

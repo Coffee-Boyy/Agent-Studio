@@ -60,6 +60,19 @@ class RunService:
         )
         return list(session.exec(stmt).all())
 
+    def list_runs(
+        self,
+        session: Session,
+        *,
+        revision_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Run]:
+        stmt = select(Run).order_by(Run.started_at.desc()).offset(offset).limit(limit)
+        if revision_id:
+            stmt = stmt.where(Run.agent_revision_id == revision_id)
+        return list(session.exec(stmt).all())
+
     def request_cancel(self, session: Session, run_id: str) -> bool:
         run = session.get(Run, run_id)
         if not run:

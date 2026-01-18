@@ -30,14 +30,7 @@ import {
   MODEL_OPTIONS,
   type LlmProvider,
 } from "../lib/llm";
-import {
-  loadAgentDraft,
-  loadTestRunsForRevision,
-  saveAgentDraft,
-  saveTestRunForRevision,
-  type AppSettings,
-  type TestRunEntry,
-} from "../lib/storage";
+import { loadAgentDraft, saveAgentDraft, type AppSettings, type TestRunEntry } from "../lib/storage";
 import type {
   AgentGraphDocV1,
   AgentNode,
@@ -357,6 +350,7 @@ export function AgentEditorPage(props: {
   const [testOutput, setTestOutput] = useState("");
   const [testStatus, setTestStatus] = useState("");
   const [testRunId, setTestRunId] = useState("");
+  const [testTraceMode, setTestTraceMode] = useState<"stream" | "static">("stream");
   const [testRunHistory, setTestRunHistory] = useState<TestRunEntry[]>([]);
   const [testErr, setTestErr] = useState<string | null>(null);
   const [testBusy, setTestBusy] = useState(false);
@@ -436,12 +430,33 @@ export function AgentEditorPage(props: {
   }, [revs, selectedRevId]);
 
   useEffect(() => {
+    let cancelled = false;
     if (!selectedRevId) {
       setTestRunHistory([]);
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
-    setTestRunHistory(loadTestRunsForRevision(selectedRevId));
-  }, [selectedRevId]);
+    async function loadRuns() {
+      try {
+        const runs = await api(props.backend).listRuns(selectedRevId, 50, 0);
+        if (cancelled) return;
+        const entries = runs.map((run) => ({
+          id: run.id,
+          created_at: run.started_at,
+          inputs_json: run.inputs_json ?? {},
+        }));
+        setTestRunHistory(entries);
+      } catch {
+        if (cancelled) return;
+        setTestRunHistory([]);
+      }
+    }
+    loadRuns();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.backend, selectedRevId]);
 
   const onNodesChange: OnNodesChange = useCallback((changes) => {
     setFlowNodes((prev) => {
@@ -496,48 +511,6 @@ export function AgentEditorPage(props: {
 
   const nodeTypes: NodeTypes = useMemo(() => ({ agentNode: AgentFlowNode }), []);
 
-  useEffect(() => {
-    function onKeyDown(e: KeyboardEvent) {
-      const isMac = navigator.platform.toLowerCase().includes("mac");
-      const mod = isMac ? e.metaKey : e.ctrlKey;
-
-      if (mod && (e.key === "z" || e.key === "Z")) {
-        e.preventDefault();
-        if (e.shiftKey) graphState.redo();
-        else graphState.undo();
-        return;
-      }
-      if (mod && (e.key === "y" || e.key === "Y")) {
-        e.preventDefault();
-        graphState.redo();
-        return;
-      }
-      if (mod && (e.key === "s" || e.key === "S")) {
-        e.preventDefault();
-        void saveRevision();
-        return;
-      }
-      if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedNodeId) {
-          e.preventDefault();
-          setGraph((g) => ({
-            ...g,
-            nodes: g.nodes.filter((n) => n.id !== selectedNodeId),
-            edges: g.edges.filter((ed) => ed.source !== selectedNodeId && ed.target !== selectedNodeId),
-          }));
-          setSelectedNodeId(null);
-        } else if (selectedEdgeId) {
-          e.preventDefault();
-          setGraph((g) => ({ ...g, edges: g.edges.filter((ed) => ed.id !== selectedEdgeId) }));
-          setSelectedEdgeId(null);
-        }
-        return;
-      }
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [graphState, saveRevision, selectedNodeId, selectedEdgeId, setGraph]);
-
   async function saveRevision() {
     setBusy(true);
     const req: AgentRevisionCreateRequest = {
@@ -576,6 +549,7 @@ export function AgentEditorPage(props: {
     setTestOutput("");
     setTestStatus("starting");
     setTestRunId("");
+    setTestTraceMode("stream");
     setTestBusy(true);
     try {
       let revisionId = selectedRevId;
@@ -614,7 +588,7 @@ export function AgentEditorPage(props: {
         created_at: new Date().toISOString(),
         inputs_json: parsed.value,
       };
-      setTestRunHistory(saveTestRunForRevision(revisionId, entry));
+      setTestRunHistory((prev) => [entry, ...prev.filter((it) => it.id !== entry.id)].slice(0, 20));
       let latest = res;
       while (latest && !latest.ended_at && !["completed", "failed", "cancelled"].includes(latest.status)) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -652,8 +626,27 @@ export function AgentEditorPage(props: {
     }
   }
 
-  function recallTestInputs(entry: TestRunEntry) {
+  async function recallTestRun(entry: TestRunEntry) {
     setTestInputText(prettyJson(entry.inputs_json ?? {}));
+    setTestOutput("");
+    setTestErr(null);
+    setTestStatus("");
+    setTestRunId(entry.id);
+    setTestTraceMode("static");
+    setTestBusy(false);
+    try {
+      const run = await api(props.backend).getRun(entry.id);
+      setTestStatus(run.status);
+      setTestInputText(prettyJson(run.inputs_json ?? entry.inputs_json ?? {}));
+      if (typeof run.final_output === "string") {
+        setTestOutput(run.final_output);
+      }
+      if (run.error) {
+        setTestErr(run.error);
+      }
+    } catch (e) {
+      setTestErr(e instanceof Error ? e.message : String(e));
+    }
   }
 
   function addNode(type: AgentNode["type"]) {
@@ -942,7 +935,7 @@ export function AgentEditorPage(props: {
           ) : testRunHistory.length === 0 ? (
             <div className="asMuted">No test runs yet for this revision.</div>
           ) : (
-            <div className="asTable">
+            <div className="asTable asRecentRunsTable">
               <div className="asTableHead">
                 <div>Run</div>
                 <div>Started</div>
@@ -955,8 +948,8 @@ export function AgentEditorPage(props: {
                   <div>{formatDateTime(entry.created_at)}</div>
                   <div className="asMuted">{formatInputPreview(entry.inputs_json)}</div>
                   <div>
-                    <button className="asBtn sm" onClick={() => recallTestInputs(entry)}>
-                      Use inputs
+                    <button className="asLink" onClick={() => recallTestRun(entry)}>
+                      Recall
                     </button>
                   </div>
                 </div>
@@ -1006,7 +999,7 @@ export function AgentEditorPage(props: {
           <TraceViewer
             backend={props.backend}
             runId={testRunId || null}
-            mode="stream"
+            mode={testTraceMode}
             emptyMessage="Run a test to stream events here."
             waitingMessage="Waiting for events…"
             title="Test trace"
@@ -1063,6 +1056,7 @@ function NodeInspector(props: {
   settings: AppSettings;
 }) {
   const { node, issues, onChange, onDelete, revisions, currentAgentName, settings } = props;
+  const workspacePickerRef = useRef<HTMLInputElement | null>(null);
   const [schemaText, setSchemaText] = useState(() =>
     node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
   );
@@ -1073,6 +1067,12 @@ function NodeInspector(props: {
       setSchemaText(prettyJson(node.schema ?? {}));
     }
   }, [node]);
+
+  useEffect(() => {
+    if (!workspacePickerRef.current) return;
+    workspacePickerRef.current.setAttribute("webkitdirectory", "");
+    workspacePickerRef.current.setAttribute("directory", "");
+  }, []);
 
   const revisionsByAgent = useMemo(() => {
     const map = new Map<string, AgentRevisionResponse[]>();
@@ -1179,6 +1179,40 @@ function NodeInspector(props: {
 
       {isModelNode ? (
         <>
+          {node.type === "code_editor" ? (
+            <label className="asField">
+              <div className="asFieldLabel">Workspace root</div>
+              <div className="asRow">
+                <input
+                  className="asInput"
+                  placeholder="Select a folder or enter a path"
+                  value={node.workspace_root ?? ""}
+                  onChange={(e) => updateModelNode({ workspace_root: e.currentTarget.value })}
+                />
+                <button
+                  className="asBtn"
+                  type="button"
+                  onClick={() => workspacePickerRef.current?.click()}
+                >
+                  Choose folder
+                </button>
+              </div>
+              <input
+                ref={workspacePickerRef}
+                type="file"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.currentTarget.files?.[0] as (File & { path?: string }) | undefined;
+                  const rawPath = file?.path ?? "";
+                  const trimmed = rawPath.replace(/[\\/][^\\/]+$/, "");
+                  if (trimmed) {
+                    updateModelNode({ workspace_root: trimmed });
+                  }
+                  e.currentTarget.value = "";
+                }}
+              />
+            </label>
+          ) : null}
           <label className="asField">
             <div className="asFieldLabel">System prompt</div>
             <textarea

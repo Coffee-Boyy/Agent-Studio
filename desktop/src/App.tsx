@@ -77,8 +77,8 @@ function App() {
     <div className="asApp">
       <aside className="asSidebar">
         <div className="asBrand">
-          <div className="asBrandTitle">Agent Studio</div>
-          <div className="asBrandSub">Local-first prompt + runs + traces</div>
+          <div className="asBrandTitle">LLM Agent Studio</div>
+          <div className="asBrandSub">Create and manage your LLM agents</div>
         </div>
 
         <nav className="asNav">

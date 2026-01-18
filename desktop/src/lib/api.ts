@@ -72,6 +72,16 @@ export function api(cfg: BackendConfig) {
       return fetchJson(joinUrl(cfg.baseUrl, `/v1/runs/${encodeURIComponent(runId)}`));
     },
 
+    async listRuns(revisionId: string | null, limit = 100, offset = 0): Promise<RunResponse[]> {
+      const params = new URLSearchParams();
+      if (revisionId) params.set("revision_id", revisionId);
+      params.set("limit", String(limit));
+      params.set("offset", String(offset));
+      const suffix = params.toString();
+      const url = suffix ? `/v1/runs?${suffix}` : "/v1/runs";
+      return fetchJson(joinUrl(cfg.baseUrl, url));
+    },
+
     async cancelRun(runId: string): Promise<{ ok: boolean }> {
       return fetchJson(joinUrl(cfg.baseUrl, `/v1/runs/${encodeURIComponent(runId)}/cancel`), { method: "POST", body: "{}" });
     },
