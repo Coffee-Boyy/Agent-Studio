@@ -17,6 +17,7 @@ import {
   type Node,
   type OnEdgesChange,
   type OnNodesChange,
+  type OnNodeDrag,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -266,32 +267,8 @@ function toFlowEdges(graph: AgentGraphDocV1): Edge[] {
   }));
 }
 
-function mergeFlow(graph: AgentGraphDocV1, flowNodes: Node[], flowEdges: Edge[]): AgentGraphDocV1 {
-  const nodeMap = new Map(flowNodes.map((n) => [n.id, n]));
-  const nodes = graph.nodes
-    .filter((n) => nodeMap.has(n.id))
-    .map((n) => {
-      const flow = nodeMap.get(n.id);
-      if (!flow) return n;
-      const parentId = typeof flow.parentId === "string" ? flow.parentId : undefined;
-      if (n.type === "loop_group") {
-        const style = flow.style ?? {};
-        const width = typeof style.width === "number" ? style.width : (n as { width?: number }).width;
-        const height = typeof style.height === "number" ? style.height : (n as { height?: number }).height;
-        return {
-          ...n,
-          position: { x: flow.position.x, y: flow.position.y },
-          width,
-          height,
-        };
-      }
-      return {
-        ...n,
-        position: { x: flow.position.x, y: flow.position.y },
-        parent_id: parentId,
-      };
-    });
-  const edges = flowEdges.map((e) => ({
+function edgesFromFlow(flowEdges: Edge[]): AgentGraphDocV1["edges"] {
+  return flowEdges.map((e) => ({
     id: e.id,
     source: e.source,
     target: e.target,
@@ -299,9 +276,16 @@ function mergeFlow(graph: AgentGraphDocV1, flowNodes: Node[], flowEdges: Edge[])
     source_handle: e.sourceHandle ?? undefined,
     target_handle: e.targetHandle ?? undefined,
   }));
-  const nodeIds = new Set(nodes.map((n) => n.id));
-  const edgesFiltered = edges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
-  return { ...graph, nodes, edges: edgesFiltered };
+}
+
+function getNodeSize(node: Node): { width: number; height: number } | null {
+  const style = node.style ?? {};
+  const width = typeof node.width === "number" ? node.width : typeof style.width === "number" ? style.width : null;
+  const height = typeof node.height === "number" ? node.height : typeof style.height === "number" ? style.height : null;
+  if (typeof width === "number" && typeof height === "number") {
+    return { width, height };
+  }
+  return null;
 }
 
 function newNode(type: AgentGraphNode["type"], idx: number): AgentGraphNode {
@@ -632,12 +616,75 @@ export function AgentEditorPage(props: {
   const onNodesChange: OnNodesChange = useCallback((changes) => {
     setFlowNodes((prev) => {
       const next = applyNodeChanges(changes, prev);
-      const shouldPersist = changes.some(
-        (change) => change.type === "position" || change.type === "remove" || change.type === "add",
-      );
+      const shouldPersist = changes.some((change) => change.type === "remove");
       if (shouldPersist) {
-        setGraph((g) => mergeFlow(g, next, flowEdgesRef.current));
+        setGraph((g) => {
+          const nodeIds = new Set(next.map((node) => node.id));
+          const nodes = g.nodes.filter((node) => nodeIds.has(node.id));
+          const edges = g.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+          return { ...g, nodes, edges };
+        });
       }
+      return next;
+    });
+  }, []);
+
+  const onNodeDragStop: OnNodeDrag = useCallback((_, dragged) => {
+    if (dragged.type === "group") return;
+    setFlowNodes((prev) => {
+      const nodeMap = new Map(prev.map((n) => [n.id, n]));
+      const current = nodeMap.get(dragged.id);
+      if (!current) return prev;
+      nodeMap.set(dragged.id, { ...current, position: dragged.position });
+      const loopGroupNodes = prev.filter((n) => n.type === "group");
+      if (loopGroupNodes.length === 0) return prev;
+
+      const draggedSize = getNodeSize(dragged) ?? getNodeSize(current) ?? { width: 0, height: 0 };
+      const draggedCenter = {
+        x: dragged.position.x + draggedSize.width / 2,
+        y: dragged.position.y + draggedSize.height / 2,
+      };
+
+      const containingGroups = loopGroupNodes.filter((group) => {
+        const groupSize = getNodeSize(group);
+        if (!groupSize) return false;
+        return (
+          draggedCenter.x >= group.position.x &&
+          draggedCenter.x <= group.position.x + groupSize.width &&
+          draggedCenter.y >= group.position.y &&
+          draggedCenter.y <= group.position.y + groupSize.height
+        );
+      });
+      const nextParentId = containingGroups
+        .sort((a, b) => {
+          const aSize = getNodeSize(a);
+          const bSize = getNodeSize(b);
+          const aArea = aSize ? aSize.width * aSize.height : Number.POSITIVE_INFINITY;
+          const bArea = bSize ? bSize.width * bSize.height : Number.POSITIVE_INFINITY;
+          return aArea - bArea;
+        })[0]?.id;
+
+      const prevParentId = typeof current.parentId === "string" ? current.parentId : undefined;
+      if (nextParentId === prevParentId) return prev;
+
+      const next = prev.map((n) => {
+        if (n.id !== current.id) return n;
+        if (nextParentId) {
+          return {
+            ...n,
+            parentId: nextParentId ?? undefined,
+          };
+        }
+        return {
+          ...n,
+          parentId: undefined,
+        };
+      });
+
+      setGraph((g) => ({
+        ...g,
+        nodes: g.nodes.map((n) => (n.id === current.id ? { ...n, parent_id: nextParentId } : n)),
+      }));
       return next;
     });
   }, []);
@@ -647,7 +694,11 @@ export function AgentEditorPage(props: {
       const next = applyEdgeChanges(changes, prev);
       const shouldPersist = changes.some((change) => change.type === "add" || change.type === "remove");
       if (shouldPersist) {
-        setGraph((g) => mergeFlow(g, flowNodesRef.current, next));
+        setGraph((g) => {
+          const nodeIds = new Set(g.nodes.map((node) => node.id));
+          const edges = edgesFromFlow(next).filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+          return { ...g, edges };
+        });
       }
       return next;
     });
@@ -671,7 +722,11 @@ export function AgentEditorPage(props: {
         return prev;
       }
       const nextEdges = addEdge(params, prev);
-      setGraph((g) => mergeFlow(g, flowNodesRef.current, nextEdges));
+      setGraph((g) => {
+        const nodeIds = new Set(g.nodes.map((node) => node.id));
+        const edges = edgesFromFlow(nextEdges).filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+        return { ...g, edges };
+      });
       return nextEdges;
     });
   }, []);
@@ -1162,6 +1217,7 @@ export function AgentEditorPage(props: {
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onNodeDragStop={onNodeDragStop}
             nodeTypes={nodeTypes}
             onNodeClick={(_, node) => {
               setSelectedNodeId(node.id);
