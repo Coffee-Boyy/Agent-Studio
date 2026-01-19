@@ -5,6 +5,8 @@ from typing import Iterable
 from agent_studio_backend.nodes.base import NodeBase, NodeHandler
 from agent_studio_backend.nodes.agent import AgentNodeHandler
 from agent_studio_backend.nodes.input import InputNodeHandler
+from agent_studio_backend.nodes.loop import LoopNodeHandler
+from agent_studio_backend.nodes.loop_group import LoopGroupNodeHandler
 from agent_studio_backend.nodes.output import OutputNodeHandler
 from agent_studio_backend.nodes.tool import ToolNodeHandler
 
@@ -32,5 +34,7 @@ DEFAULT_NODE_REGISTRY = NodeRegistry(
         OutputNodeHandler(),
         AgentNodeHandler(),
         ToolNodeHandler(),
+        LoopNodeHandler(),
+        LoopGroupNodeHandler(),
     ]
 )

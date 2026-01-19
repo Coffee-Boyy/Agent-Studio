@@ -125,7 +125,15 @@ export type ToolNode = NodeBase & {
   description?: string | null;
 };
 
-export type AgentGraphNode = InputNode | OutputNode | AgentNode | ToolNode;
+export type LoopGroupNode = NodeBase & {
+  type: "loop_group";
+  condition?: string;
+  max_iterations?: number;
+  width?: number;
+  height?: number;
+};
+
+export type AgentGraphNode = InputNode | OutputNode | AgentNode | ToolNode | LoopGroupNode;
 
 export type AgentGraphDocV1 = {
   schema_version: "graph-v1";

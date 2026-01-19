@@ -4,6 +4,7 @@ from typing import Any
 
 from agent_studio_backend.agent_spec import AgentGraphDocV1, AgentSpecEnvelope, ValidationIssue
 from agent_studio_backend.nodes.agent import AgentNode
+from agent_studio_backend.nodes.loop_group import LoopGroupNode
 from agent_studio_backend.nodes.registry import DEFAULT_NODE_REGISTRY
 from agent_studio_backend.nodes.tool import (
     build_tool_specs,
@@ -44,6 +45,8 @@ def validate_graph(doc: AgentGraphDocV1) -> list[ValidationIssue]:
 
     connected_ids = {e.source for e in doc.edges} | {e.target for e in doc.edges}
     for node in doc.nodes:
+        if isinstance(node, LoopGroupNode):
+            continue
         if node.id not in connected_ids:
             issues.append(
                 ValidationIssue(

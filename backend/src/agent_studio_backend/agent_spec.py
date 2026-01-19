@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 from agent_studio_backend.nodes.base import NodeBase
 from agent_studio_backend.nodes.agent import AgentNode as AgentNodeModel
 from agent_studio_backend.nodes.input import InputNode
+from agent_studio_backend.nodes.loop import LoopNode
+from agent_studio_backend.nodes.loop_group import LoopGroupNode
 from agent_studio_backend.nodes.output import OutputNode
 from agent_studio_backend.nodes.tool import ToolNode
 from agent_studio_backend.validation import ValidationIssue
@@ -32,6 +34,8 @@ AgentNode = Union[
     OutputNode,
     AgentNodeModel,
     ToolNode,
+    LoopNode,
+    LoopGroupNode,
 ]
 
 

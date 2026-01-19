@@ -966,6 +966,10 @@ body,
   border-color: rgba(34, 197, 94, 0.5);
   background: rgba(34, 197, 94, 0.12);
 }
+.asNodeTypePill.type-loop_group {
+  border-color: rgba(245, 158, 11, 0.55);
+  background: rgba(245, 158, 11, 0.12);
+}
 .asNodeTypePill.type-output {
   border-color: rgba(148, 163, 184, 0.6);
   background: rgba(148, 163, 184, 0.15);
@@ -1205,6 +1209,9 @@ body,
 .asFlowNode.type-tool {
   border-left: 4px solid rgba(34, 197, 94, 0.9);
 }
+.asFlowNode.type-loop_group {
+  border-left: 4px solid rgba(245, 158, 11, 0.9);
+}
 .asFlowNode.type-output {
   border-left: 4px solid rgba(148, 163, 184, 0.9);
 }
@@ -1217,6 +1224,29 @@ body,
     box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.4), 0 0 16px rgba(148, 163, 184, 0.38),
       0 14px 30px rgba(0, 0, 0, 0.45);
   }
+}
+
+/* Loop group node */
+.asFlowGroup {
+  width: 100%;
+  height: 100%;
+  border-radius: 12px;
+  border: 1px dashed rgba(245, 158, 11, 0.6);
+  background: rgba(245, 158, 11, 0.08);
+  padding: 10px 12px;
+  color: inherit;
+  box-sizing: border-box;
+}
+.asFlowGroupTitle {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: rgba(120, 113, 108, 0.9);
+}
+.asFlowGroupName {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 6px;
 }
 
 /* Palette buttons */
@@ -1233,6 +1263,9 @@ body,
 }
 .asPaletteBtn.type-tool {
   border-left-color: rgba(34, 197, 94, 0.9);
+}
+.asPaletteBtn.type-loop_group {
+  border-left-color: rgba(245, 158, 11, 0.9);
 }
 .asPaletteBtn.type-output {
   border-left-color: rgba(148, 163, 184, 0.9);

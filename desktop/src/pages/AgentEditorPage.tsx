@@ -138,6 +138,23 @@ const NODE_HELP: Record<AgentGraphNode["type"], NodeHelpContent> = {
     ],
     tips: ["Keep tools side-effect focused and narrow in scope.", "Match the schema to the expected arguments."],
   },
+  loop_group: {
+    title: "Loop group",
+    summary:
+      "Evaluates a condition to decide whether to repeat part of the workflow or exit. Use it to implement bounded iteration.",
+    connections: [
+      "Contains nodes that repeat as a subflow.",
+      "Has one entry edge and one exit edge.",
+    ],
+    fields: [
+      "Condition: expression evaluated against last output + inputs.",
+      "Max iterations: hard cap to prevent infinite loops.",
+    ],
+    tips: [
+      "Use `iteration`, `last`, `inputs`, and `max_iterations` in expressions.",
+      "Connect into the group and out of the group once.",
+    ],
+  },
   output: {
     title: "Output node",
     summary:
@@ -208,17 +225,34 @@ function tryParseJsonValue(text: string): { ok: boolean; value: unknown } {
 }
 
 function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, ValidationIssue[]>): Node[] {
-  return graph.nodes.map((n) => ({
-    id: n.id,
-    position: n.position,
-    data: {
-      label: `${n.type}${n.name ? `: ${n.name}` : ""}`,
-      nodeType: n.type,
-      name: n.name ?? "",
-      issueCount: issuesByNodeId.get(n.id)?.length ?? 0,
-    },
-    type: "agentNode",
-  }));
+  return graph.nodes.map((n) => {
+    const base = {
+      id: n.id,
+      position: n.position,
+      data: {
+        label: `${n.type}${n.name ? `: ${n.name}` : ""}`,
+        nodeType: n.type,
+        name: n.name ?? "",
+        issueCount: issuesByNodeId.get(n.id)?.length ?? 0,
+      },
+    };
+    const parentId = typeof (n as { parent_id?: unknown }).parent_id === "string" ? (n as { parent_id?: string }).parent_id : undefined;
+    if (n.type === "loop_group") {
+      const width = typeof (n as { width?: unknown }).width === "number" ? (n as { width: number }).width : 360;
+      const height = typeof (n as { height?: unknown }).height === "number" ? (n as { height: number }).height : 240;
+      return {
+        ...base,
+        type: "group",
+        style: { width, height },
+      };
+    }
+    return {
+      ...base,
+      type: "agentNode",
+      parentId,
+      extent: parentId ? "parent" : undefined,
+    };
+  });
 }
 
 function toFlowEdges(graph: AgentGraphDocV1): Edge[] {
@@ -239,7 +273,23 @@ function mergeFlow(graph: AgentGraphDocV1, flowNodes: Node[], flowEdges: Edge[])
     .map((n) => {
       const flow = nodeMap.get(n.id);
       if (!flow) return n;
-      return { ...n, position: { x: flow.position.x, y: flow.position.y } };
+      const parentId = typeof flow.parentId === "string" ? flow.parentId : undefined;
+      if (n.type === "loop_group") {
+        const style = flow.style ?? {};
+        const width = typeof style.width === "number" ? style.width : (n as { width?: number }).width;
+        const height = typeof style.height === "number" ? style.height : (n as { height?: number }).height;
+        return {
+          ...n,
+          position: { x: flow.position.x, y: flow.position.y },
+          width,
+          height,
+        };
+      }
+      return {
+        ...n,
+        position: { x: flow.position.x, y: flow.position.y },
+        parent_id: parentId,
+      };
     });
   const edges = flowEdges.map((e) => ({
     id: e.id,
@@ -284,6 +334,18 @@ function newNode(type: AgentGraphNode["type"], idx: number): AgentGraphNode {
       code: 'def run(ctx, **kwargs):\n    return {"received": kwargs}\n',
     };
   }
+  if (type === "loop_group") {
+    return {
+      id,
+      type,
+      name: "Loop group",
+      position,
+      condition: "iteration < max_iterations",
+      max_iterations: 3,
+      width: 360,
+      height: 240,
+    };
+  }
   if (type === "output") {
     return { id, type, name: "Output", position };
   }
@@ -314,7 +376,20 @@ function migrateLegacyGraph(graph: AgentGraphDocV1): AgentGraphDocV1 {
       });
       continue;
     }
-    if (type === "tool" || type === "input" || type === "output") {
+    if (type === "loop") {
+      migratedNodes.push({
+        id: String(node.id ?? crypto.randomUUID()),
+        type: "loop_group",
+        name: typeof node.name === "string" ? node.name : "Loop group",
+        position: (node.position as AgentGraphNode["position"]) ?? { x: 0, y: 0 },
+        condition: typeof node.condition === "string" ? node.condition : "iteration < max_iterations",
+        max_iterations: typeof node.max_iterations === "number" ? node.max_iterations : 3,
+        width: typeof node.width === "number" ? node.width : 360,
+        height: typeof node.height === "number" ? node.height : 240,
+      });
+      continue;
+    }
+    if (type === "tool" || type === "input" || type === "output" || type === "loop_group") {
       migratedNodes.push(node as AgentGraphNode);
       continue;
     }
@@ -409,6 +484,18 @@ function AgentFlowNode(props: { data: { label: string; nodeType: string; name: s
         {data.issueCount > 0 ? <span className="asFlowNodeIssue">{data.issueCount}</span> : null}
       </div>
       <div className="asFlowNodeName">{data.name || data.label}</div>
+    </div>
+  );
+}
+
+function LoopGroupFlowNode(props: { data: { label: string; nodeType: string; name: string } }) {
+  const { data } = props;
+  return (
+    <div className={`asFlowGroup type-${data.nodeType}`}>
+      <div className="asFlowGroupTitle">
+        <span className="asFlowGroupType">loop group</span>
+      </div>
+      <div className="asFlowGroupName">{data.name || data.label}</div>
     </div>
   );
 }
@@ -580,6 +667,9 @@ export function AgentEditorPage(props: {
       if (targetType === "tool") {
         return prev;
       }
+      if (sourceType === "loop_group" || targetType === "loop_group") {
+        return prev;
+      }
       const nextEdges = addEdge(params, prev);
       setGraph((g) => mergeFlow(g, flowNodesRef.current, nextEdges));
       return nextEdges;
@@ -602,7 +692,11 @@ export function AgentEditorPage(props: {
     }
   }, [selectedNodeId]);
 
-  const nodeTypes: NodeTypes = useMemo(() => ({ agentNode: AgentFlowNode }), []);
+  const loopGroups = useMemo(
+    () => graph.nodes.filter((node) => node.type === "loop_group"),
+    [graph.nodes],
+  );
+  const nodeTypes: NodeTypes = useMemo(() => ({ agentNode: AgentFlowNode, group: LoopGroupFlowNode }), []);
 
   async function saveRevision() {
     setBusy(true);
@@ -911,7 +1005,7 @@ export function AgentEditorPage(props: {
                   <span>Node details</span>
                 </div>
                 <div className="asNodeInspectorActions">
-                  <span className={`asNodeTypePill type-${selectedNode.type}`}>{selectedNode.type}</span>
+                  <span className={`asNodeTypePill type-${selectedNode.type}`}>{selectedNode.type.replace("_", " ")}</span>
                   <button
                     className="asHelpIcon"
                     type="button"
@@ -937,6 +1031,7 @@ export function AgentEditorPage(props: {
                 onDelete={deleteNode}
                 settings={props.settings}
                 helpOpen={nodeHelpOpen}
+                loopGroups={loopGroups}
               />
             ) : selectedEdge ? (
               <div className="asStack">
@@ -987,6 +1082,9 @@ export function AgentEditorPage(props: {
             </button>
             <button className="asBtn asPaletteBtn type-tool" onClick={() => addNode("tool")}>
               + Tool
+            </button>
+            <button className="asBtn asPaletteBtn type-loop_group" onClick={() => addNode("loop_group")}>
+              + Loop
             </button>
             <button className="asBtn asPaletteBtn type-output" onClick={() => addNode("output")}>
               + Output
@@ -1252,8 +1350,9 @@ function NodeInspector(props: {
   onDelete: (nodeId: string) => void;
   settings: AppSettings;
   helpOpen: boolean;
+  loopGroups: AgentGraphNode[];
 }) {
-  const { node, issues, onChange, onDelete, settings, helpOpen } = props;
+  const { node, issues, onChange, onDelete, settings, helpOpen, loopGroups } = props;
   const [schemaText, setSchemaText] = useState(() =>
     node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
   );
@@ -1414,6 +1513,82 @@ function NodeInspector(props: {
           }}
         />
       </label>
+
+      {node.type !== "loop_group" ? (
+        <label className="asField">
+          <div className="asFieldLabel">Parent loop group</div>
+          <select
+            className="asSelect"
+            value={typeof (node as { parent_id?: unknown }).parent_id === "string" ? (node as { parent_id?: string }).parent_id : ""}
+            onChange={(e) => {
+              const nextParent = e.currentTarget.value || undefined;
+              onChange({ ...node, parent_id: nextParent });
+            }}
+          >
+            <option value="">None</option>
+            {loopGroups
+              .filter((group) => group.id !== node.id)
+              .map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.name || group.id}
+                </option>
+              ))}
+          </select>
+        </label>
+      ) : null}
+
+      {node.type === "loop_group" ? (
+        <>
+          <label className="asField">
+            <div className="asFieldLabel">Condition</div>
+            <textarea
+              className="asTextarea"
+              rows={3}
+              value={node.condition ?? ""}
+              onChange={(e) => onChange({ ...node, condition: e.currentTarget.value })}
+            />
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Max iterations</div>
+            <input
+              className="asInput"
+              type="number"
+              min={1}
+              value={node.max_iterations ?? 1}
+              onChange={(e) => {
+                const nextValue = Number(e.currentTarget.value);
+                onChange({ ...node, max_iterations: Number.isFinite(nextValue) ? nextValue : 1 });
+              }}
+            />
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Width</div>
+            <input
+              className="asInput"
+              type="number"
+              min={200}
+              value={node.width ?? 360}
+              onChange={(e) => {
+                const nextValue = Number(e.currentTarget.value);
+                onChange({ ...node, width: Number.isFinite(nextValue) ? nextValue : 360 });
+              }}
+            />
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Height</div>
+            <input
+              className="asInput"
+              type="number"
+              min={160}
+              value={node.height ?? 240}
+              onChange={(e) => {
+                const nextValue = Number(e.currentTarget.value);
+                onChange({ ...node, height: Number.isFinite(nextValue) ? nextValue : 240 });
+              }}
+            />
+          </label>
+        </>
+      ) : null}
 
       {isModelNode ? (
         <>
