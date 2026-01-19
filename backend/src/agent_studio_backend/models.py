@@ -12,6 +12,37 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class Workflow(SQLModel, table=True):
+    """
+    Represents a workflow's identity. The name can be changed without creating
+    new entries - revisions track the actual graph content separately.
+    """
+
+    __tablename__ = "workflows"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    name: str = Field(index=True)
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    updated_at: datetime = Field(default_factory=now_utc, index=True)
+
+
+class WorkflowRevision(SQLModel, table=True):
+    """
+    Stores a snapshot of a workflow's graph content. Each save creates a new
+    revision, enabling version history without duplicating the workflow identity.
+    """
+
+    __tablename__ = "workflow_revisions"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    workflow_id: str = Field(index=True)
+    created_at: datetime = Field(default_factory=now_utc, index=True)
+    author: Optional[str] = Field(default=None, index=True)
+    content_hash: str = Field(index=True)
+    spec_json: dict[str, Any] = Field(sa_column=Column(JSON), default_factory=dict)
+
+
+# Legacy model kept for backward compatibility during migration
 class AgentRevision(SQLModel, table=True):
     __tablename__ = "agent_revisions"
 
@@ -27,7 +58,10 @@ class Run(SQLModel, table=True):
     __tablename__ = "runs"
 
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
-    agent_revision_id: str = Field(index=True)
+    # New field - for new workflow revisions
+    workflow_revision_id: str = Field(default="", index=True)
+    # Legacy field for backward compatibility with existing runs
+    agent_revision_id: Optional[str] = Field(default=None, index=True)
     started_at: datetime = Field(default_factory=now_utc, index=True)
     ended_at: Optional[datetime] = Field(default=None, index=True)
     status: str = Field(default="queued", index=True)  # queued|running|completed|failed|cancelled

@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from sqlmodel import Session, select
 
-from agent_studio_backend.models import AgentRevision, Run, RunEvent, now_utc
+from agent_studio_backend.models import AgentRevision, Run, RunEvent, Workflow, WorkflowRevision, now_utc
 from agent_studio_backend.services.event_bus import EVENT_BUS
 from agent_studio_backend.services.executor import DEFAULT_EXECUTOR, Executor
 
@@ -30,13 +30,13 @@ class RunService:
         self,
         session: Session,
         *,
-        agent_revision_id: str,
+        workflow_revision_id: str,
         inputs_json: dict[str, Any],
         tags_json: dict[str, Any],
         group_id: Optional[str],
     ) -> Run:
         run = Run(
-            agent_revision_id=agent_revision_id,
+            workflow_revision_id=workflow_revision_id,
             inputs_json=inputs_json,
             tags_json=tags_json,
             group_id=group_id,
@@ -65,23 +65,24 @@ class RunService:
         session: Session,
         *,
         revision_id: Optional[str] = None,
-        workflow_name: Optional[str] = None,
+        workflow_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Run]:
-        if workflow_name:
-            stmt = (
-                select(Run)
-                .join(AgentRevision, AgentRevision.id == Run.agent_revision_id)
-                .where(AgentRevision.name == workflow_name)
-                .order_by(Run.started_at.desc())
-                .offset(offset)
-                .limit(limit)
-            )
-        else:
-            stmt = select(Run).order_by(Run.started_at.desc()).offset(offset).limit(limit)
+        stmt = select(Run).order_by(Run.started_at.desc()).offset(offset).limit(limit)
+
+        if workflow_id:
+            # Get all revision IDs for this workflow and filter runs
+            rev_stmt = select(WorkflowRevision.id).where(WorkflowRevision.workflow_id == workflow_id)
+            revision_ids = list(session.exec(rev_stmt).all())
+            if revision_ids:
+                stmt = stmt.where(Run.workflow_revision_id.in_(revision_ids))
+            else:
+                return []
+
         if revision_id:
-            stmt = stmt.where(Run.agent_revision_id == revision_id)
+            stmt = stmt.where(Run.workflow_revision_id == revision_id)
+
         return list(session.exec(stmt).all())
 
     def request_cancel(self, session: Session, run_id: str) -> bool:

@@ -6,6 +6,53 @@ export type HealthResponse = {
   ok: boolean;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Workflow types
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type WorkflowCreateRequest = {
+  name: string;
+  spec_json?: Record<string, unknown>;
+  author?: string;
+};
+
+export type WorkflowUpdateRequest = {
+  name?: string;
+};
+
+export type WorkflowResponse = {
+  id: string;
+  name: string;
+  created_at: IsoDateTimeString;
+  updated_at: IsoDateTimeString;
+};
+
+export type WorkflowRevisionCreateRequest = {
+  spec_json: Record<string, unknown>;
+  author?: string;
+};
+
+export type WorkflowRevisionResponse = {
+  id: string;
+  workflow_id: string;
+  created_at: IsoDateTimeString;
+  author?: string | null;
+  content_hash: string;
+  spec_json: Record<string, unknown>;
+};
+
+export type WorkflowWithLatestRevisionResponse = {
+  id: string;
+  name: string;
+  created_at: IsoDateTimeString;
+  updated_at: IsoDateTimeString;
+  latest_revision: WorkflowRevisionResponse | null;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy agent revision types (kept for backward compatibility)
+// ─────────────────────────────────────────────────────────────────────────────
+
 export type AgentRevisionCreateRequest = {
   name: string;
   spec_json: Record<string, unknown>;
@@ -19,6 +66,10 @@ export type AgentRevisionResponse = {
   spec_json: Record<string, unknown>;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Run types
+// ─────────────────────────────────────────────────────────────────────────────
+
 export type LlmConnection = {
   provider: LlmProvider;
   api_key?: string;
@@ -28,7 +79,9 @@ export type LlmConnection = {
 };
 
 export type RunCreateRequest = {
-  agent_revision_id: string;
+  workflow_revision_id?: string;
+  // Legacy field for backward compatibility
+  agent_revision_id?: string;
   inputs_json: Record<string, unknown>;
   tags_json: Record<string, unknown>;
   group_id: string | null;
@@ -37,7 +90,9 @@ export type RunCreateRequest = {
 
 export type RunResponse = {
   id: string;
-  agent_revision_id: string;
+  workflow_revision_id: string;
+  // Legacy field for backward compatibility
+  agent_revision_id?: string | null;
   started_at: IsoDateTimeString;
   ended_at: IsoDateTimeString | null;
   status: "queued" | "running" | "completed" | "failed" | "cancelled" | (string & {});

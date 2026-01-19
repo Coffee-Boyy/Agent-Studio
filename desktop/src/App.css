@@ -840,7 +840,6 @@ body,
 }
 
 .asEditorFooter {
-  margin-top: 14px;
   grid-column: 1 / -1;
 }
 .asEditorWide {

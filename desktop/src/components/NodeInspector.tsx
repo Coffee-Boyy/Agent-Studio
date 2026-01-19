@@ -258,29 +258,6 @@ export function NodeInspector(props: {
         />
       </label>
 
-      {node.type !== "loop_group" ? (
-        <label className="asField">
-          <div className="asFieldLabel">Parent loop group</div>
-          <select
-            className="asSelect"
-            value={typeof (node as { parent_id?: unknown }).parent_id === "string" ? (node as { parent_id?: string }).parent_id : ""}
-            onChange={(e) => {
-              const nextParent = e.currentTarget.value || undefined;
-              onChange({ ...node, parent_id: nextParent });
-            }}
-          >
-            <option value="">None</option>
-            {loopGroups
-              .filter((group) => group.id !== node.id)
-              .map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.name || group.id}
-                </option>
-              ))}
-          </select>
-        </label>
-      ) : null}
-
       {node.type === "loop_group" ? (
         <>
           <label className="asField">

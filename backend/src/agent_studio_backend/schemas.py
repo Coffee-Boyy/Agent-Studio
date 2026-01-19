@@ -13,6 +13,63 @@ class HealthResponse(BaseModel):
     ok: bool = True
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Workflow endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class WorkflowCreateRequest(BaseModel):
+    name: str
+    spec_json: dict[str, Any] = Field(default_factory=dict)
+    author: Optional[str] = None
+
+
+class WorkflowUpdateRequest(BaseModel):
+    name: Optional[str] = None
+
+
+class WorkflowResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowWithLatestRevisionResponse(BaseModel):
+    """Workflow info combined with its latest revision for convenience."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
+    latest_revision: Optional["WorkflowRevisionResponse"] = None
+
+
+class WorkflowRevisionCreateRequest(BaseModel):
+    spec_json: dict[str, Any] = Field(default_factory=dict)
+    author: Optional[str] = None
+
+
+class WorkflowRevisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workflow_id: str
+    created_at: datetime
+    author: Optional[str] = None
+    content_hash: str
+    spec_json: dict[str, Any]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy agent revision endpoints (kept for backward compatibility)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class AgentRevisionCreateRequest(BaseModel):
     name: str
     author: Optional[str] = None
@@ -39,7 +96,10 @@ class LlmConnection(BaseModel):
 
 
 class RunCreateRequest(BaseModel):
-    agent_revision_id: str
+    # New field - preferred
+    workflow_revision_id: Optional[str] = None
+    # Legacy field - for backward compatibility
+    agent_revision_id: Optional[str] = None
     inputs_json: dict[str, Any] = Field(default_factory=dict)
     tags_json: dict[str, Any] = Field(default_factory=dict)
     group_id: Optional[str] = None
@@ -50,7 +110,9 @@ class RunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    agent_revision_id: str
+    workflow_revision_id: str
+    # Legacy field - for backward compatibility
+    agent_revision_id: Optional[str] = None
     started_at: datetime
     ended_at: Optional[datetime] = None
     status: str

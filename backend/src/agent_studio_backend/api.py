@@ -22,12 +22,20 @@ from agent_studio_backend.schemas import (
     SpecCompileResponse,
     SpecValidateRequest,
     SpecValidateResponse,
+    WorkflowCreateRequest,
+    WorkflowResponse,
+    WorkflowRevisionCreateRequest,
+    WorkflowRevisionResponse,
+    WorkflowUpdateRequest,
+    WorkflowWithLatestRevisionResponse,
 )
 from agent_studio_backend.services.compiler import compile_to_spec, validate_graph
 from agent_studio_backend.services.event_bus import EVENT_BUS
 from agent_studio_backend.services.revisions import REVISIONS
 from agent_studio_backend.services.runs import RUNS, sse_format
+from agent_studio_backend.services.workflows import WORKFLOWS
 from agent_studio_backend.settings import get_settings
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,6 +74,140 @@ def compile_spec(req: SpecValidateRequest) -> SpecCompileResponse:
     return SpecCompileResponse(compiled=compiled)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Workflow endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.post("/v1/workflows", response_model=WorkflowWithLatestRevisionResponse)
+def create_workflow(req: WorkflowCreateRequest) -> WorkflowWithLatestRevisionResponse:
+    """Create a new workflow with an optional initial revision."""
+    with Session(ENGINE) as session:
+        workflow, revision = WORKFLOWS.create_workflow(
+            session,
+            name=req.name,
+            spec_json=req.spec_json if req.spec_json else None,
+            author=req.author,
+        )
+        return WorkflowWithLatestRevisionResponse(
+            id=workflow.id,
+            name=workflow.name,
+            created_at=workflow.created_at,
+            updated_at=workflow.updated_at,
+            latest_revision=WorkflowRevisionResponse.model_validate(revision) if revision else None,
+        )
+
+
+@app.get("/v1/workflows", response_model=list[WorkflowWithLatestRevisionResponse])
+def list_workflows(limit: int = 100, offset: int = 0) -> list[WorkflowWithLatestRevisionResponse]:
+    """List all workflows with their latest revisions."""
+    with Session(ENGINE) as session:
+        results = WORKFLOWS.list_workflows_with_latest_revision(
+            session,
+            limit=min(limit, 500),
+            offset=max(offset, 0),
+        )
+        return [
+            WorkflowWithLatestRevisionResponse(
+                id=workflow.id,
+                name=workflow.name,
+                created_at=workflow.created_at,
+                updated_at=workflow.updated_at,
+                latest_revision=WorkflowRevisionResponse.model_validate(revision) if revision else None,
+            )
+            for workflow, revision in results
+        ]
+
+
+@app.get("/v1/workflows/{workflow_id}", response_model=WorkflowWithLatestRevisionResponse)
+def get_workflow(workflow_id: str) -> WorkflowWithLatestRevisionResponse:
+    """Get a workflow by ID with its latest revision."""
+    with Session(ENGINE) as session:
+        result = WORKFLOWS.get_workflow_with_latest_revision(session, workflow_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="workflow_not_found")
+        workflow, revision = result
+        return WorkflowWithLatestRevisionResponse(
+            id=workflow.id,
+            name=workflow.name,
+            created_at=workflow.created_at,
+            updated_at=workflow.updated_at,
+            latest_revision=WorkflowRevisionResponse.model_validate(revision) if revision else None,
+        )
+
+
+@app.put("/v1/workflows/{workflow_id}", response_model=WorkflowResponse)
+def update_workflow(workflow_id: str, req: WorkflowUpdateRequest) -> WorkflowResponse:
+    """Update workflow metadata (e.g., rename) without creating a new revision."""
+    with Session(ENGINE) as session:
+        workflow = WORKFLOWS.update_workflow(session, workflow_id, name=req.name)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="workflow_not_found")
+        return WorkflowResponse.model_validate(workflow)
+
+
+@app.delete("/v1/workflows/{workflow_id}")
+def delete_workflow_by_id(workflow_id: str) -> dict[str, Any]:
+    """Delete a workflow and all its revisions."""
+    with Session(ENGINE) as session:
+        deleted = WORKFLOWS.delete_workflow(session, workflow_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="workflow_not_found")
+        return {"deleted": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workflow revision endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@app.post("/v1/workflows/{workflow_id}/revisions", response_model=WorkflowRevisionResponse)
+def create_workflow_revision(workflow_id: str, req: WorkflowRevisionCreateRequest) -> WorkflowRevisionResponse:
+    """Create a new revision for an existing workflow."""
+    with Session(ENGINE) as session:
+        workflow = WORKFLOWS.get_workflow(session, workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="workflow_not_found")
+        revision = WORKFLOWS.create_revision(
+            session,
+            workflow_id=workflow_id,
+            spec_json=req.spec_json,
+            author=req.author,
+        )
+        return WorkflowRevisionResponse.model_validate(revision)
+
+
+@app.get("/v1/workflows/{workflow_id}/revisions", response_model=list[WorkflowRevisionResponse])
+def list_workflow_revisions(workflow_id: str, limit: int = 100, offset: int = 0) -> list[WorkflowRevisionResponse]:
+    """List all revisions for a workflow."""
+    with Session(ENGINE) as session:
+        workflow = WORKFLOWS.get_workflow(session, workflow_id)
+        if not workflow:
+            raise HTTPException(status_code=404, detail="workflow_not_found")
+        revisions = WORKFLOWS.list_revisions(
+            session,
+            workflow_id,
+            limit=min(limit, 500),
+            offset=max(offset, 0),
+        )
+        return [WorkflowRevisionResponse.model_validate(r) for r in revisions]
+
+
+@app.get("/v1/workflow-revisions/{revision_id}", response_model=WorkflowRevisionResponse)
+def get_workflow_revision(revision_id: str) -> WorkflowRevisionResponse:
+    """Get a specific workflow revision by ID."""
+    with Session(ENGINE) as session:
+        revision = WORKFLOWS.get_revision(session, revision_id)
+        if not revision:
+            raise HTTPException(status_code=404, detail="revision_not_found")
+        return WorkflowRevisionResponse.model_validate(revision)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy agent revision endpoints (kept for backward compatibility)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 @app.post("/v1/agent-revisions", response_model=AgentRevisionResponse)
 def create_agent_revision(req: AgentRevisionCreateRequest) -> AgentRevisionResponse:
     with Session(ENGINE) as session:
@@ -89,24 +231,33 @@ def get_agent_revision(revision_id: str) -> AgentRevisionResponse:
         return AgentRevisionResponse.model_validate(rev)
 
 
-@app.delete("/v1/workflows/{workflow_name}")
-def delete_workflow(workflow_name: str) -> dict[str, Any]:
-    with Session(ENGINE) as session:
-        deleted = REVISIONS.delete_by_name(session, name=workflow_name)
-        return {"deleted": deleted}
+# ─────────────────────────────────────────────────────────────────────────────
+# Run endpoints
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 @app.post("/v1/runs", response_model=RunResponse)
 async def create_run(req: RunCreateRequest) -> RunResponse:
     with Session(ENGINE) as session:
-        rev = REVISIONS.get(session, req.agent_revision_id)
-        if not rev:
-            raise HTTPException(status_code=404, detail="agent_revision_not_found")
-        spec_json = dict(rev.spec_json)
+        # Support both new workflow_revision_id and legacy agent_revision_id
+        revision_id = req.workflow_revision_id or req.agent_revision_id
+        if not revision_id:
+            raise HTTPException(status_code=400, detail="workflow_revision_id or agent_revision_id required")
+
+        # Try new workflow revision first, then fall back to legacy
+        revision = WORKFLOWS.get_revision(session, revision_id)
+        if revision:
+            spec_json = dict(revision.spec_json)
+        else:
+            # Fall back to legacy agent revision
+            rev = REVISIONS.get(session, revision_id)
+            if not rev:
+                raise HTTPException(status_code=404, detail="revision_not_found")
+            spec_json = dict(rev.spec_json)
 
         run = RUNS.create_run(
             session,
-            agent_revision_id=req.agent_revision_id,
+            workflow_revision_id=revision_id,
             inputs_json=req.inputs_json,
             tags_json=req.tags_json,
             group_id=req.group_id,
@@ -142,7 +293,7 @@ def get_run(run_id: str) -> RunResponse:
 @app.get("/v1/runs", response_model=list[RunResponse])
 def list_runs(
     revision_id: Optional[str] = None,
-    workflow_name: Optional[str] = None,
+    workflow_id: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[RunResponse]:
@@ -150,7 +301,7 @@ def list_runs(
         runs = RUNS.list_runs(
             session,
             revision_id=revision_id,
-            workflow_name=workflow_name,
+            workflow_id=workflow_id,
             limit=min(limit, 500),
             offset=max(offset, 0),
         )

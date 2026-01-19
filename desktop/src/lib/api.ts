@@ -8,6 +8,11 @@ import type {
   SpecCompileResponse,
   SpecValidateRequest,
   SpecValidateResponse,
+  WorkflowCreateRequest,
+  WorkflowRevisionCreateRequest,
+  WorkflowRevisionResponse,
+  WorkflowUpdateRequest,
+  WorkflowWithLatestRevisionResponse,
 } from "./types";
 
 export type BackendConfig = { baseUrl: string };
@@ -51,6 +56,61 @@ export function api(cfg: BackendConfig) {
       return fetchJson(joinUrl(cfg.baseUrl, "/v1/health"));
     },
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Workflow endpoints
+    // ─────────────────────────────────────────────────────────────────────────
+
+    async createWorkflow(req: WorkflowCreateRequest): Promise<WorkflowWithLatestRevisionResponse> {
+      return fetchJson(joinUrl(cfg.baseUrl, "/v1/workflows"), { method: "POST", body: JSON.stringify(req) });
+    },
+
+    async listWorkflows(limit = 100, offset = 0): Promise<WorkflowWithLatestRevisionResponse[]> {
+      const url = joinUrl(cfg.baseUrl, `/v1/workflows?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`);
+      return fetchJson(url);
+    },
+
+    async getWorkflow(workflowId: string): Promise<WorkflowWithLatestRevisionResponse> {
+      return fetchJson(joinUrl(cfg.baseUrl, `/v1/workflows/${encodeURIComponent(workflowId)}`));
+    },
+
+    async updateWorkflow(workflowId: string, req: WorkflowUpdateRequest): Promise<WorkflowWithLatestRevisionResponse> {
+      return fetchJson(joinUrl(cfg.baseUrl, `/v1/workflows/${encodeURIComponent(workflowId)}`), {
+        method: "PUT",
+        body: JSON.stringify(req),
+      });
+    },
+
+    async deleteWorkflow(workflowId: string): Promise<{ deleted: boolean }> {
+      return fetchJson(joinUrl(cfg.baseUrl, `/v1/workflows/${encodeURIComponent(workflowId)}`), { method: "DELETE" });
+    },
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Workflow revision endpoints
+    // ─────────────────────────────────────────────────────────────────────────
+
+    async createWorkflowRevision(workflowId: string, req: WorkflowRevisionCreateRequest): Promise<WorkflowRevisionResponse> {
+      return fetchJson(joinUrl(cfg.baseUrl, `/v1/workflows/${encodeURIComponent(workflowId)}/revisions`), {
+        method: "POST",
+        body: JSON.stringify(req),
+      });
+    },
+
+    async listWorkflowRevisions(workflowId: string, limit = 100, offset = 0): Promise<WorkflowRevisionResponse[]> {
+      const url = joinUrl(
+        cfg.baseUrl,
+        `/v1/workflows/${encodeURIComponent(workflowId)}/revisions?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+      );
+      return fetchJson(url);
+    },
+
+    async getWorkflowRevision(revisionId: string): Promise<WorkflowRevisionResponse> {
+      return fetchJson(joinUrl(cfg.baseUrl, `/v1/workflow-revisions/${encodeURIComponent(revisionId)}`));
+    },
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Legacy agent revision endpoints (kept for backward compatibility)
+    // ─────────────────────────────────────────────────────────────────────────
+
     async createAgentRevision(req: AgentRevisionCreateRequest): Promise<AgentRevisionResponse> {
       return fetchJson(joinUrl(cfg.baseUrl, "/v1/agent-revisions"), { method: "POST", body: JSON.stringify(req) });
     },
@@ -64,9 +124,9 @@ export function api(cfg: BackendConfig) {
       return fetchJson(joinUrl(cfg.baseUrl, `/v1/agent-revisions/${encodeURIComponent(revisionId)}`));
     },
 
-    async deleteWorkflow(name: string): Promise<{ deleted: number }> {
-      return fetchJson(joinUrl(cfg.baseUrl, `/v1/workflows/${encodeURIComponent(name)}`), { method: "DELETE" });
-    },
+    // ─────────────────────────────────────────────────────────────────────────
+    // Run endpoints
+    // ─────────────────────────────────────────────────────────────────────────
 
     async createRun(req: RunCreateRequest): Promise<RunResponse> {
       return fetchJson(joinUrl(cfg.baseUrl, "/v1/runs"), { method: "POST", body: JSON.stringify(req) });
@@ -76,15 +136,15 @@ export function api(cfg: BackendConfig) {
       return fetchJson(joinUrl(cfg.baseUrl, `/v1/runs/${encodeURIComponent(runId)}`));
     },
 
-    async listRuns(limit = 100, offset = 0, opts?: { revisionId?: string; workflowName?: string }): Promise<RunResponse[]> {
+    async listRuns(limit = 100, offset = 0, opts?: { revisionId?: string; workflowId?: string }): Promise<RunResponse[]> {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
       params.set("offset", String(offset));
       if (opts?.revisionId) {
         params.set("revision_id", opts.revisionId);
       }
-      if (opts?.workflowName) {
-        params.set("workflow_name", opts.workflowName);
+      if (opts?.workflowId) {
+        params.set("workflow_id", opts.workflowId);
       }
       return fetchJson(joinUrl(cfg.baseUrl, `/v1/runs?${params.toString()}`));
     },
@@ -100,6 +160,10 @@ export function api(cfg: BackendConfig) {
       );
       return fetchJson(url);
     },
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Spec endpoints
+    // ─────────────────────────────────────────────────────────────────────────
 
     async validateSpec(req: SpecValidateRequest): Promise<SpecValidateResponse> {
       return fetchJson(joinUrl(cfg.baseUrl, "/v1/spec/validate"), { method: "POST", body: JSON.stringify(req) });

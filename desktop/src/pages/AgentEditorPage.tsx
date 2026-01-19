@@ -11,6 +11,7 @@ import {
   Position,
   ReactFlow,
   type ReactFlowInstance,
+  type NodeProps,
   type NodeTypes,
   type Connection,
   type Edge,
@@ -33,10 +34,10 @@ import { loadAgentDraft, saveAgentDraft, type AppSettings, type TestRunEntry } f
 import type {
   AgentGraphDocV1,
   AgentGraphNode,
-  AgentRevisionCreateRequest,
-  AgentRevisionResponse,
   AgentSpecEnvelope,
   ValidationIssue,
+  WorkflowRevisionResponse,
+  WorkflowWithLatestRevisionResponse,
 } from "../lib/types";
 import { TraceViewer } from "../components/TraceViewer";
 import { useUndoRedoState } from "../components/UndoRedo";
@@ -322,27 +323,13 @@ function AgentFlowNode(props: { data: { label: string; nodeType: string; name: s
   );
 }
 
-function LoopGroupFlowNode(props: { data: { label: string; nodeType: string; name: string }; selected?: boolean }) {
-  const { data, selected } = props;
-  return (
-    <>
-      <NodeResizer minWidth={100} minHeight={30} isVisible={selected} />
-      <div className={`asFlowGroup type-${data.nodeType}`}>
-        <div className="asFlowGroupTitle">
-          <span className="asFlowGroupType">{data.name || data.label}</span>
-        </div>
-      </div>
-    </>
-  );
-}
-
 export function AgentEditorPage(props: {
   backend: BackendConfig;
   settings: AppSettings;
   onStartRun: (runId: string) => void;
-  selectedRevisionId?: string;
-  onSelectRevision?: (revId: string) => void;
-  onRevisionsChange?: (revs: AgentRevisionResponse[]) => void;
+  selectedWorkflowId?: string;
+  onSelectWorkflow?: (workflowId: string) => void;
+  onWorkflowsChange?: (workflows: WorkflowWithLatestRevisionResponse[]) => void;
 }) {
   const graphState = useUndoRedoState<AgentGraphDocV1>(() => {
     const draft = loadAgentDraft();
@@ -354,10 +341,10 @@ export function AgentEditorPage(props: {
   const graph = graphState.value;
   const setGraph = graphState.setValue;
 
-  const [revs, setRevs] = useState<AgentRevisionResponse[] | null>(null);
-  const [selectedRevId, setSelectedRevId] = useState<string>("");
+  const [workflows, setWorkflows] = useState<WorkflowWithLatestRevisionResponse[] | null>(null);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
+  const [selectedRevisionId, setSelectedRevisionId] = useState<string>("");
   const [name, setName] = useState("New Workflow");
-  const [baselineName, setBaselineName] = useState("New Workflow");
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [issues, setIssues] = useState<ValidationIssue[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -401,6 +388,7 @@ export function AgentEditorPage(props: {
   const [flowEdges, setFlowEdges] = useState<Edge[]>(() => toFlowEdges(graph));
   const flowNodesRef = useRef(flowNodes);
   const flowEdgesRef = useRef(flowEdges);
+  const loadedWorkflowIdRef = useRef<string>("");
 
   useEffect(() => {
     flowNodesRef.current = flowNodes;
@@ -440,42 +428,76 @@ export function AgentEditorPage(props: {
     setFlowEdges(nextEdges);
   }, [graph, issuesByNodeId]);
 
-  const refreshRevisions = useCallback(async () => {
+  const refreshWorkflows = useCallback(async () => {
     try {
-      const list = await api(props.backend).listAgentRevisions();
-      setRevs(list);
-      props.onRevisionsChange?.(list);
+      const list = await api(props.backend).listWorkflows();
+      setWorkflows(list);
+      props.onWorkflowsChange?.(list);
     } catch (e) {
-      setRevs(null);
+      setWorkflows(null);
     }
-  }, [props.backend, props.onRevisionsChange]);
+  }, [props.backend, props.onWorkflowsChange]);
 
   useEffect(() => {
-    refreshRevisions();
-  }, [refreshRevisions]);
+    refreshWorkflows();
+  }, [refreshWorkflows]);
 
-  const selectRevision = useCallback(
-    (revId: string) => {
-      setSelectedRevId(revId);
-      props.onSelectRevision?.(revId);
-      loadRevision(revId);
+  const selectWorkflow = useCallback(
+    (workflowId: string) => {
+      setSelectedWorkflowId(workflowId);
+      props.onSelectWorkflow?.(workflowId);
     },
-    [loadRevision, props.onSelectRevision],
+    [props.onSelectWorkflow],
   );
 
+  // Effect to load workflow when selectedWorkflowId changes or workflows first becomes available
   useEffect(() => {
-    if (!props.selectedRevisionId) return;
-    if (props.selectedRevisionId === selectedRevId) return;
-    setSelectedRevId(props.selectedRevisionId);
-    loadRevision(props.selectedRevisionId);
-  }, [props.selectedRevisionId, selectedRevId]);
+    if (!selectedWorkflowId || !workflows) return;
+    // Skip if we've already loaded this workflow (prevents reloading on workflows refresh)
+    if (loadedWorkflowIdRef.current === selectedWorkflowId) return;
+    
+    const workflow = workflows.find((w) => w.id === selectedWorkflowId);
+    if (!workflow) return;
+    const revision = workflow.latest_revision;
+    if (!revision) {
+      setErr("Workflow has no revisions.");
+      return;
+    }
+    const spec = revision.spec_json as AgentSpecEnvelope;
+    if (!spec || spec.schema_version !== "graph-v1" || !spec.graph) {
+      setErr("Selected revision is not a graph-v1 spec.");
+      return;
+    }
+    
+    loadedWorkflowIdRef.current = selectedWorkflowId;
+    const nextGraph = migrateLegacyGraph(spec.graph);
+    setGraph(nextGraph);
+    setHasUnsavedChanges(false);
+    graphState.clearHistory();
+    const nextName = workflow.name || "New Workflow";
+    setName(nextName);
+    setSelectedRevisionId(revision.id);
+    setErr(null);
+    setIssues(null);
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    // Reset the graph editor viewport
+    setTimeout(() => flowRef.current?.fitView({ padding: 0.2, duration: 200 }), 50);
+  }, [selectedWorkflowId, workflows]);
 
+  // Sync with props.selectedWorkflowId
   useEffect(() => {
-    if (selectedRevId || !revs || revs.length === 0) return;
-    const first = revs[0];
-    selectRevision(first.id);
-    setName(first.name || "New Workflow");
-  }, [revs, selectedRevId, selectRevision]);
+    if (!props.selectedWorkflowId) return;
+    if (props.selectedWorkflowId === selectedWorkflowId) return;
+    setSelectedWorkflowId(props.selectedWorkflowId);
+  }, [props.selectedWorkflowId, selectedWorkflowId]);
+
+  // Auto-select first workflow if none selected
+  useEffect(() => {
+    if (selectedWorkflowId || !workflows || workflows.length === 0) return;
+    const first = workflows[0];
+    selectWorkflow(first.id);
+  }, [workflows, selectedWorkflowId, selectWorkflow]);
 
   const onNodesChange: OnNodesChange = useCallback((changes) => {
     setFlowNodes((prev) => {
@@ -716,7 +738,70 @@ export function AgentEditorPage(props: {
     () => graph.nodes.filter((node) => node.type === "loop_group"),
     [graph.nodes],
   );
-  const nodeTypes: NodeTypes = useMemo(() => ({ agentNode: AgentFlowNode, group: LoopGroupFlowNode }), []);
+
+  const LoopGroupFlowNode = useCallback(
+    ({ id, data, selected }: NodeProps) => {
+      const typedData = data as { label: string; nodeType: string; name: string };
+      return (
+        <>
+          <NodeResizer
+            minWidth={100}
+            minHeight={30}
+            isVisible={!!selected}
+            onResizeEnd={(_, params) => {
+              const nextWidth = typeof params.width === "number" ? params.width : null;
+              const nextHeight = typeof params.height === "number" ? params.height : null;
+              if (nextWidth == null || nextHeight == null) return;
+
+              const nextX = typeof params.x === "number" ? params.x : null;
+              const nextY = typeof params.y === "number" ? params.y : null;
+
+              const width = Math.round(nextWidth);
+              const height = Math.round(nextHeight);
+
+              setHasUnsavedChanges(true);
+
+              // Persist into the React Flow state immediately (so it doesn't "snap back")
+              // and into the graph document (so it survives refresh/save/undo stack).
+              setFlowNodes((prev) =>
+                prev.map((n) =>
+                  n.id === id
+                    ? {
+                        ...n,
+                        position: nextX != null && nextY != null ? { x: nextX, y: nextY } : n.position,
+                        style: { ...(n.style ?? {}), width, height },
+                      }
+                    : n,
+                ),
+              );
+
+              setGraph((g) => ({
+                ...g,
+                nodes: g.nodes.map((n) =>
+                  n.id === id && n.type === "loop_group"
+                    ? {
+                        ...n,
+                        position: nextX != null && nextY != null ? { x: nextX, y: nextY } : n.position,
+                        width,
+                        height,
+                      }
+                    : n,
+                ),
+              }));
+            }}
+          />
+          <div className={`asFlowGroup type-${typedData.nodeType}`}>
+            <div className="asFlowGroupTitle">
+              <span className="asFlowGroupType">{typedData.name || typedData.label}</span>
+            </div>
+          </div>
+        </>
+      );
+    },
+    [setFlowNodes, setGraph],
+  );
+
+  const nodeTypes: NodeTypes = useMemo(() => ({ agentNode: AgentFlowNode, group: LoopGroupFlowNode }), [LoopGroupFlowNode]);
 
   const onUndo = useCallback(() => {
     setHasUnsavedChanges(true);
@@ -730,21 +815,45 @@ export function AgentEditorPage(props: {
 
   async function saveRevision() {
     setBusy(true);
-    const req: AgentRevisionCreateRequest = {
-      name: name.trim() || "Visual agent",
-      spec_json: buildEnvelope(graph),
-    };
     try {
       const validation = await api(props.backend).validateSpec({ spec: buildEnvelope(graph) });
       setIssues(validation.issues);
       if (!validation.ok || validation.issues.length > 0) {
         return;
       }
-      const res = await api(props.backend).createAgentRevision(req);
+
+      const trimmedName = name.trim() || "Visual agent";
+
+      if (selectedWorkflowId) {
+        // Update existing workflow: check if name changed, then create revision
+        const currentWorkflow = workflows?.find((w) => w.id === selectedWorkflowId);
+        if (currentWorkflow && currentWorkflow.name !== trimmedName) {
+          // Name changed - update the workflow
+          await api(props.backend).updateWorkflow(selectedWorkflowId, { name: trimmedName });
+        }
+        // Create a new revision for the existing workflow
+        const revision = await api(props.backend).createWorkflowRevision(selectedWorkflowId, {
+          spec_json: buildEnvelope(graph),
+        });
+        setSelectedRevisionId(revision.id);
+      } else {
+        // Create a new workflow with initial revision
+        const res = await api(props.backend).createWorkflow({
+          name: trimmedName,
+          spec_json: buildEnvelope(graph),
+        });
+        // Mark as loaded to prevent effect from re-running
+        loadedWorkflowIdRef.current = res.id;
+        setSelectedWorkflowId(res.id);
+        props.onSelectWorkflow?.(res.id);
+        if (res.latest_revision) {
+          setSelectedRevisionId(res.latest_revision.id);
+        }
+      }
+
       setErr(null);
       setIssues(null);
-      await refreshRevisions();
-      selectRevision(res.id);
+      await refreshWorkflows();
       setHasUnsavedChanges(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -770,7 +879,7 @@ export function AgentEditorPage(props: {
     setTestTraceMode("stream");
     setTestBusy(true);
     try {
-      let revisionId = selectedRevId;
+      let revisionId = selectedRevisionId;
       if (!revisionId) {
         const spec = buildEnvelope(graph);
         const validation = await api(props.backend).validateSpec({ spec });
@@ -779,20 +888,37 @@ export function AgentEditorPage(props: {
           setTestErr("Fix validation issues before testing.");
           return;
         }
-        const res = await api(props.backend).createAgentRevision({
-          name: name.trim() || "Visual agent",
-          spec_json: spec,
-        });
-        await refreshRevisions();
-        selectRevision(res.id);
-        revisionId = res.id;
+
+        const trimmedName = name.trim() || "Visual agent";
+
+        if (selectedWorkflowId) {
+          // Create a new revision for the existing workflow
+          const revision = await api(props.backend).createWorkflowRevision(selectedWorkflowId, {
+            spec_json: spec,
+          });
+          revisionId = revision.id;
+          setSelectedRevisionId(revision.id);
+        } else {
+          // Create a new workflow with initial revision
+          const res = await api(props.backend).createWorkflow({
+            name: trimmedName,
+            spec_json: spec,
+          });
+          setSelectedWorkflowId(res.id);
+          props.onSelectWorkflow?.(res.id);
+          if (res.latest_revision) {
+            revisionId = res.latest_revision.id;
+            setSelectedRevisionId(res.latest_revision.id);
+          }
+        }
+        await refreshWorkflows();
       }
       const llmConnection = buildLlmConnectionPayload(
         props.settings.llmProvider,
         props.settings.llmConnections[props.settings.llmProvider],
       );
       const res = await api(props.backend).createRun({
-        agent_revision_id: revisionId,
+        workflow_revision_id: revisionId,
         inputs_json: parsed.value,
         tags_json: {},
         group_id: null,
@@ -909,11 +1035,8 @@ export function AgentEditorPage(props: {
     }
   }
 
-  function loadRevision(revId: string) {
-    if (!revId || !revs) return;
-    const rev = revs.find((r) => r.id === revId);
-    if (!rev) return;
-    const spec = rev.spec_json as AgentSpecEnvelope;
+  function loadRevision(revision: WorkflowRevisionResponse) {
+    const spec = revision.spec_json as AgentSpecEnvelope;
     if (!spec || spec.schema_version !== "graph-v1" || !spec.graph) {
       setErr("Selected revision is not a graph-v1 spec.");
       return;
@@ -922,9 +1045,7 @@ export function AgentEditorPage(props: {
     setGraph(nextGraph);
     setHasUnsavedChanges(false);
     graphState.clearHistory();
-    const nextName = rev.name || "New Workflow";
-    setName(nextName);
-    setBaselineName(nextName);
+    setSelectedRevisionId(revision.id);
     setErr(null);
     setIssues(null);
     setSelectedNodeId(null);
@@ -939,23 +1060,29 @@ export function AgentEditorPage(props: {
     graphState.clearHistory();
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
-    setSelectedRevId("");
-    props.onSelectRevision?.("");
+    setSelectedWorkflowId("");
+    setSelectedRevisionId("");
+    loadedWorkflowIdRef.current = "";
+    props.onSelectWorkflow?.("");
     setIssues(null);
     setErr(null);
     setName("New Workflow");
-    setBaselineName("New Workflow");
     // Reset the graph editor viewport
     setTimeout(() => flowRef.current?.fitView({ padding: 0.2, duration: 200 }), 50);
 
     setBusy(true);
     try {
-      const res = await api(props.backend).createAgentRevision({
+      const res = await api(props.backend).createWorkflow({
         name: "New Workflow",
         spec_json: buildEnvelope(DEFAULT_GRAPH),
       });
-      await refreshRevisions();
-      selectRevision(res.id);
+      await refreshWorkflows();
+      // Set the loaded ref so we don't re-trigger the load effect
+      loadedWorkflowIdRef.current = res.id;
+      selectWorkflow(res.id);
+      if (res.latest_revision) {
+        setSelectedRevisionId(res.latest_revision.id);
+      }
       setHasUnsavedChanges(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -964,24 +1091,37 @@ export function AgentEditorPage(props: {
     }
   }
 
-  const activeWorkflowName = useMemo(() => {
-    const selected = revs?.find((rev) => rev.id === selectedRevId);
-    if (selected?.name) return selected.name;
-    const baseline = baselineName.trim();
-    return baseline || name.trim();
-  }, [revs, selectedRevId, baselineName, name]);
-
-  const workflowRevisions = useMemo(() => {
-    if (!revs || !activeWorkflowName) return [];
-    const trimmedName = activeWorkflowName.trim();
-    return revs
-      .filter((rev) => (rev.name || "").trim() === trimmedName)
-      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
-  }, [revs, activeWorkflowName]);
+  const [workflowRevisions, setWorkflowRevisions] = useState<WorkflowRevisionResponse[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!selectedRevId || !activeWorkflowName) {
+    if (!selectedWorkflowId) {
+      setWorkflowRevisions([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function loadRevisions() {
+      try {
+        const revisions = await api(props.backend).listWorkflowRevisions(selectedWorkflowId);
+        if (cancelled) return;
+        setWorkflowRevisions(revisions);
+      } catch {
+        if (cancelled) return;
+        setWorkflowRevisions([]);
+      }
+    }
+
+    loadRevisions();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.backend, selectedWorkflowId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedWorkflowId) {
       setTestRunHistory([]);
       return () => {
         cancelled = true;
@@ -990,7 +1130,7 @@ export function AgentEditorPage(props: {
 
     async function loadRuns() {
       try {
-        const runs = await api(props.backend).listRuns(5, 0, { workflowName: activeWorkflowName });
+        const runs = await api(props.backend).listRuns(5, 0, { workflowId: selectedWorkflowId });
         if (cancelled) return;
         setTestRunHistory(runs);
       } catch {
@@ -1003,7 +1143,7 @@ export function AgentEditorPage(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.backend, selectedRevId, activeWorkflowName]);
+  }, [props.backend, selectedWorkflowId]);
 
   return (
     <div className="asEditor">
@@ -1143,11 +1283,14 @@ export function AgentEditorPage(props: {
               </button>
               <select
                 className="asSelect asSelectInline asSelectUnderline"
-                value={workflowRevisions.some((rev) => rev.id === selectedRevId) ? selectedRevId : ""}
+                value={workflowRevisions.some((rev) => rev.id === selectedRevisionId) ? selectedRevisionId : ""}
                 onChange={(e) => {
                   const next = e.currentTarget.value;
                   if (!next) return;
-                  selectRevision(next);
+                  const revision = workflowRevisions.find((r) => r.id === next);
+                  if (revision) {
+                    loadRevision(revision);
+                  }
                 }}
               >
                 <option value="" disabled>
