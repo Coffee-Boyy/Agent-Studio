@@ -226,7 +226,7 @@ function tryParseJsonValue(text: string): { ok: boolean; value: unknown } {
 }
 
 function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, ValidationIssue[]>): Node[] {
-  return graph.nodes.map((n) => {
+  const nodes: Node[] = graph.nodes.map((n) => {
     const base = {
       id: n.id,
       position: n.position,
@@ -245,15 +245,16 @@ function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, Validat
         ...base,
         type: "group",
         style: { width, height },
-      };
+      } as Node;
     }
     return {
       ...base,
       type: "agentNode",
       parentId,
-      extent: parentId ? "parent" : undefined,
-    };
+      extent: parentId ? ("parent" as const) : undefined,
+    } as Node;
   });
+  return nodes.sort(sortNodesForReactFlow);
 }
 
 function toFlowEdges(graph: AgentGraphDocV1): Edge[] {
@@ -286,6 +287,13 @@ function getNodeSize(node: Node): { width: number; height: number } | null {
     return { width, height };
   }
   return null;
+}
+
+// React Flow requires parent nodes to appear before their children in the array.
+// This ensures groups are rendered before their child nodes.
+function sortNodesForReactFlow(a: Node, b: Node): number {
+  if (a.type === b.type) return 0;
+  return a.type === "group" && b.type !== "group" ? -1 : 1;
 }
 
 function newNode(type: AgentGraphNode["type"], idx: number): AgentGraphNode {
@@ -567,11 +575,23 @@ export function AgentEditorPage(props: {
     const nextEdges = toFlowEdges(graph);
     setFlowNodes((prev) => {
       const prevById = new Map(prev.map((n) => [n.id, n]));
-      return nextNodes.map((node) => {
-        const existing = prevById.get(node.id);
-        if (!existing) return node;
-        return { ...existing, position: node.position, data: node.data, type: node.type };
-      });
+      return nextNodes
+        .map((node) => {
+          const existing = prevById.get(node.id);
+          if (!existing) return node;
+          // Merge existing node with graph-derived values.
+          // Important: parentId, extent, position, data, and type must come from the graph
+          // to ensure coordinate system consistency (relative vs absolute positions).
+          return {
+            ...existing,
+            position: node.position,
+            data: node.data,
+            type: node.type,
+            parentId: node.parentId,
+            extent: node.extent,
+          };
+        })
+        .sort(sortNodesForReactFlow);
     });
     setFlowEdges(nextEdges);
   }, [graph, issuesByNodeId]);
@@ -632,19 +652,35 @@ export function AgentEditorPage(props: {
   const onNodeDragStop: OnNodeDrag = useCallback((_, dragged) => {
     if (dragged.type === "group") return;
     setFlowNodes((prev) => {
-      const nodeMap = new Map(prev.map((n) => [n.id, n]));
-      const current = nodeMap.get(dragged.id);
+      const current = prev.find((n) => n.id === dragged.id);
       if (!current) return prev;
-      nodeMap.set(dragged.id, { ...current, position: dragged.position });
+
       const loopGroupNodes = prev.filter((n) => n.type === "group");
       if (loopGroupNodes.length === 0) return prev;
 
+      const prevParentId = typeof current.parentId === "string" ? current.parentId : undefined;
+
+      // Calculate the absolute position of the dragged node.
+      // If the node currently has a parent, dragged.position is relative to the parent,
+      // so we need to add the parent's position to get absolute coordinates.
+      let absolutePosition = { ...dragged.position };
+      if (prevParentId) {
+        const currentParent = prev.find((n) => n.id === prevParentId);
+        if (currentParent) {
+          absolutePosition = {
+            x: dragged.position.x + currentParent.position.x,
+            y: dragged.position.y + currentParent.position.y,
+          };
+        }
+      }
+
       const draggedSize = getNodeSize(dragged) ?? getNodeSize(current) ?? { width: 0, height: 0 };
       const draggedCenter = {
-        x: dragged.position.x + draggedSize.width / 2,
-        y: dragged.position.y + draggedSize.height / 2,
+        x: absolutePosition.x + draggedSize.width / 2,
+        y: absolutePosition.y + draggedSize.height / 2,
       };
 
+      // Find groups that contain the node's center point
       const containingGroups = loopGroupNodes.filter((group) => {
         const groupSize = getNodeSize(group);
         if (!groupSize) return false;
@@ -655,6 +691,8 @@ export function AgentEditorPage(props: {
           draggedCenter.y <= group.position.y + groupSize.height
         );
       });
+
+      // Pick the smallest containing group (most specific)
       const nextParentId = containingGroups
         .sort((a, b) => {
           const aSize = getNodeSize(a);
@@ -664,27 +702,51 @@ export function AgentEditorPage(props: {
           return aArea - bArea;
         })[0]?.id;
 
-      const prevParentId = typeof current.parentId === "string" ? current.parentId : undefined;
+      // No change in parent, no position adjustment needed
       if (nextParentId === prevParentId) return prev;
 
-      const next = prev.map((n) => {
-        if (n.id !== current.id) return n;
-        if (nextParentId) {
+      // Calculate the new position based on the new parent
+      let newPosition: { x: number; y: number };
+      if (nextParentId) {
+        // Node is being parented to a group: convert absolute to relative position
+        const newParent = prev.find((n) => n.id === nextParentId);
+        if (newParent) {
+          const parentSize = getNodeSize(newParent) ?? { width: 0, height: 0 };
+          // Calculate relative position inside parent
+          let relX = absolutePosition.x - newParent.position.x;
+          let relY = absolutePosition.y - newParent.position.y;
+          // Clamp to stay within parent bounds
+          relX = Math.max(0, Math.min(relX, parentSize.width - draggedSize.width));
+          relY = Math.max(0, Math.min(relY, parentSize.height - draggedSize.height));
+          newPosition = { x: relX, y: relY };
+        } else {
+          newPosition = absolutePosition;
+        }
+      } else {
+        // Node is being removed from a parent: use the absolute position
+        newPosition = absolutePosition;
+      }
+
+      const next = prev
+        .map((n) => {
+          if (n.id !== current.id) return n;
           return {
             ...n,
-            parentId: nextParentId ?? undefined,
+            position: newPosition,
+            parentId: nextParentId,
+            extent: nextParentId ? ("parent" as const) : undefined,
           };
-        }
-        return {
-          ...n,
-          parentId: undefined,
-        };
-      });
+        })
+        .sort(sortNodesForReactFlow);
 
+      // Update the graph state with new parent_id and position
       setGraph((g) => ({
         ...g,
-        nodes: g.nodes.map((n) => (n.id === current.id ? { ...n, parent_id: nextParentId } : n)),
+        nodes: g.nodes.map((n) =>
+          n.id === current.id ? { ...n, parent_id: nextParentId, position: newPosition } : n
+        ),
       }));
+
       return next;
     });
   }, []);
