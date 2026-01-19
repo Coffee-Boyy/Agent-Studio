@@ -6,6 +6,14 @@ export function prettyJson(v: unknown): string {
   }
 }
 
+export function tryParseJsonValue(text: string): { ok: boolean; value: unknown } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
 export function tryParseJsonObject(text: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
   try {
     const v = JSON.parse(text) as unknown;

@@ -18,6 +18,7 @@ import {
   type OnEdgesChange,
   type OnNodesChange,
   type OnNodeDrag,
+  NodeResizer,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
@@ -26,25 +27,20 @@ import { formatDateTime, prettyJson, tryParseJsonObject } from "../lib/json";
 import {
   buildLlmConnectionPayload,
   DEFAULT_LLM_PROVIDER,
-  fetchModelsFromProvider,
-  isLlmProvider,
-  LLM_PROVIDERS,
-  LLM_PROVIDER_LABELS,
   MODEL_OPTIONS,
-  type LlmProvider,
 } from "../lib/llm";
 import { loadAgentDraft, saveAgentDraft, type AppSettings, type TestRunEntry } from "../lib/storage";
 import type {
   AgentGraphDocV1,
   AgentGraphNode,
-  AgentNode,
   AgentRevisionCreateRequest,
   AgentRevisionResponse,
   AgentSpecEnvelope,
-  ToolNode,
   ValidationIssue,
 } from "../lib/types";
 import { TraceViewer } from "../components/TraceViewer";
+import { useUndoRedoState } from "../components/UndoRedo";
+import { NodeInspector } from "../components/NodeInspector";
 
 const DEFAULT_GRAPH: AgentGraphDocV1 = {
   schema_version: "graph-v1",
@@ -81,89 +77,6 @@ const DEFAULT_GRAPH: AgentGraphDocV1 = {
   ],
   viewport: { x: 0, y: 0, zoom: 1 },
   metadata: {},
-};
-
-type NodeHelpContent = {
-  title: string;
-  summary: string;
-  connections: string[];
-  fields: string[];
-  tips: string[];
-};
-
-const NODE_HELP: Record<AgentGraphNode["type"], NodeHelpContent> = {
-  input: {
-    title: "Input node",
-    summary:
-      "Defines the entry point for data flowing into the workflow. Use this node to describe the shape of incoming inputs and to make validation explicit.",
-    connections: [
-      "Source-only node: connects to agents or tools that consume input.",
-      "Typically the first node in a workflow.",
-    ],
-    fields: ["Name: friendly label used in the graph.", "Schema: JSON schema describing the expected input payload."],
-    tips: [
-      "Keep the schema minimal but accurate to help validation.",
-      "Use examples in your test runs to match this schema.",
-    ],
-  },
-  agent: {
-    title: "Agent node",
-    summary:
-      "Runs an LLM-powered agent that interprets instructions, uses tools, and produces outputs. This is the core reasoning unit in a workflow.",
-    connections: [
-      "Accepts inputs from upstream nodes (input, tool, or other agents).",
-      "Can connect to tools and outputs.",
-    ],
-    fields: [
-      "Instructions: system prompt for the agent.",
-      "Provider/Model: LLM configuration for this agent.",
-      "Workspace root: optional sandbox root for file operations.",
-      "Guardrails: optional input/output validation policies.",
-      "Output schema: optional JSON schema describing structured output.",
-    ],
-    tips: ["Keep instructions focused on role + task.", "Add output schema when downstream steps need structured data."],
-  },
-  tool: {
-    title: "Tool node",
-    summary:
-      "Defines a callable tool that the agent can execute. Tools are small, deterministic functions that return structured data.",
-    connections: [
-      "Source-only node: connects to agent nodes only.",
-      "Agents call tools during reasoning; tools return data to the agent.",
-    ],
-    fields: [
-      "Name/Tool name: how the agent calls the tool.",
-      "Description: guidance for when to use the tool.",
-      "Code: implementation of the tool.",
-      "Schema: JSON schema for tool arguments.",
-    ],
-    tips: ["Keep tools side-effect focused and narrow in scope.", "Match the schema to the expected arguments."],
-  },
-  loop_group: {
-    title: "Loop group",
-    summary:
-      "Evaluates a condition to decide whether to repeat part of the workflow or exit. Use it to implement bounded iteration.",
-    connections: [
-      "Contains nodes that repeat as a subflow.",
-      "Has one entry edge and one exit edge.",
-    ],
-    fields: [
-      "Condition: expression evaluated against last output + inputs.",
-      "Max iterations: hard cap to prevent infinite loops.",
-    ],
-    tips: [
-      "Use `iteration`, `last`, `inputs`, and `max_iterations` in expressions.",
-      "Connect into the group and out of the group once.",
-    ],
-  },
-  output: {
-    title: "Output node",
-    summary:
-      "Marks the final output of the workflow. Use this node to capture the last response from the graph.",
-    connections: ["Target-only node: receives output from the final agent.", "Typically the last node in the workflow."],
-    fields: ["Name: friendly label for the output."],
-    tips: ["Use a single output node to simplify downstream consumers.", "Pair with output schema on the agent for structure."],
-  },
 };
 
 function buildEnvelope(graph: AgentGraphDocV1): AgentSpecEnvelope {
@@ -217,16 +130,10 @@ function formatRelativeTime(isoTime: string): string {
   return rtf.format(0, "second");
 }
 
-function tryParseJsonValue(text: string): { ok: boolean; value: unknown } {
-  try {
-    return { ok: true, value: JSON.parse(text) };
-  } catch {
-    return { ok: false, value: null };
-  }
-}
-
 function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, ValidationIssue[]>): Node[] {
   const nodes: Node[] = graph.nodes.map((n) => {
+    const parentId = typeof (n as { parent_id?: unknown }).parent_id === "string" ? (n as { parent_id?: string }).parent_id : undefined;
+    const parentNode = parentId ? graph.nodes.find((node) => node.id === parentId) : undefined;
     const base = {
       id: n.id,
       position: n.position,
@@ -235,16 +142,18 @@ function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, Validat
         nodeType: n.type,
         name: n.name ?? "",
         issueCount: issuesByNodeId.get(n.id)?.length ?? 0,
+        hasParent: !!parentId,
+        parentName: parentNode?.name,
       },
     };
-    const parentId = typeof (n as { parent_id?: unknown }).parent_id === "string" ? (n as { parent_id?: string }).parent_id : undefined;
     if (n.type === "loop_group") {
-      const width = typeof (n as { width?: unknown }).width === "number" ? (n as { width: number }).width : 360;
-      const height = typeof (n as { height?: unknown }).height === "number" ? (n as { height: number }).height : 240;
       return {
         ...base,
         type: "group",
-        style: { width, height },
+        style: {
+          width: n.width,
+          height: n.height,
+        },
       } as Node;
     }
     return {
@@ -390,84 +299,13 @@ function migrateLegacyGraph(graph: AgentGraphDocV1): AgentGraphDocV1 {
   return { ...graph, nodes: migratedNodes, edges };
 }
 
-type UndoRedoState<T> = {
-  value: T;
-  setValue: (updater: T | ((prev: T) => T)) => void;
-  undo: () => void;
-  redo: () => void;
-  canUndo: boolean;
-  canRedo: boolean;
-  clearHistory: () => void;
-};
-
-function useUndoRedoState<T>(initial: () => T): UndoRedoState<T> {
-  const [value, setValue] = useState<T>(initial);
-  const [past, setPast] = useState<T[]>([]);
-  const [future, setFuture] = useState<T[]>([]);
-  const applyingHistoryRef = useRef(false);
-
-  const setValueWithHistory = useCallback((updater: T | ((prev: T) => T)) => {
-    setValue((prev) => {
-      const next = typeof updater === "function" ? (updater as (p: T) => T)(prev) : updater;
-      if (!applyingHistoryRef.current) {
-        setPast((p) => [...p, prev]);
-        setFuture([]);
-      }
-      return next;
-    });
-  }, []);
-
-  const undo = useCallback(() => {
-    setPast((p) => {
-      if (p.length === 0) return p;
-      const prev = p[p.length - 1];
-      applyingHistoryRef.current = true;
-      setValue((curr) => {
-        setFuture((f) => [curr, ...f]);
-        return prev;
-      });
-      applyingHistoryRef.current = false;
-      return p.slice(0, -1);
-    });
-  }, []);
-
-  const redo = useCallback(() => {
-    setFuture((f) => {
-      if (f.length === 0) return f;
-      const next = f[0];
-      applyingHistoryRef.current = true;
-      setValue((curr) => {
-        setPast((p) => [...p, curr]);
-        return next;
-      });
-      applyingHistoryRef.current = false;
-      return f.slice(1);
-    });
-  }, []);
-
-  const clearHistory = useCallback(() => {
-    setPast([]);
-    setFuture([]);
-  }, []);
-
-  return {
-    value,
-    setValue: setValueWithHistory,
-    undo,
-    redo,
-    canUndo: past.length > 0,
-    canRedo: future.length > 0,
-    clearHistory,
-  };
-}
-
-function AgentFlowNode(props: { data: { label: string; nodeType: string; name: string; issueCount: number }; selected?: boolean }) {
+function AgentFlowNode(props: { data: { label: string; nodeType: string; name: string; issueCount: number; hasParent?: boolean; parentName?: string }; selected?: boolean }) {
   const { data, selected } = props;
   const isSourceOnly = data.nodeType === "input" || data.nodeType === "tool";
   const isTargetOnly = data.nodeType === "output";
 
   return (
-    <div className={`asFlowNode type-${data.nodeType}${selected ? " isSelected" : ""}`}>
+    <div className={`asFlowNode type-${data.nodeType}${selected ? " isSelected" : ""}${data.hasParent ? " inLoopGroup" : ""}`}>
       {!isSourceOnly ? <Handle className="nodrag" type="target" position={Position.Left} /> : null}
       {!isTargetOnly ? <Handle className="nodrag" type="source" position={Position.Right} /> : null}
       <div className="asFlowNodeTitle">
@@ -475,19 +313,26 @@ function AgentFlowNode(props: { data: { label: string; nodeType: string; name: s
         {data.issueCount > 0 ? <span className="asFlowNodeIssue">{data.issueCount}</span> : null}
       </div>
       <div className="asFlowNodeName">{data.name || data.label}</div>
+      {data.hasParent ? (
+        <div className="asFlowNodeLoopBadge" title={`Inside loop: ${data.parentName || "Loop group"}`}>
+          ↻
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function LoopGroupFlowNode(props: { data: { label: string; nodeType: string; name: string } }) {
-  const { data } = props;
+function LoopGroupFlowNode(props: { data: { label: string; nodeType: string; name: string }; selected?: boolean }) {
+  const { data, selected } = props;
   return (
-    <div className={`asFlowGroup type-${data.nodeType}`}>
-      <div className="asFlowGroupTitle">
-        <span className="asFlowGroupType">loop group</span>
+    <>
+      <NodeResizer minWidth={100} minHeight={30} isVisible={selected} />
+      <div className={`asFlowGroup type-${data.nodeType}`}>
+        <div className="asFlowGroupTitle">
+          <span className="asFlowGroupType">{data.name || data.label}</span>
+        </div>
       </div>
-      <div className="asFlowGroupName">{data.name || data.label}</div>
-    </div>
+    </>
   );
 }
 
@@ -513,7 +358,7 @@ export function AgentEditorPage(props: {
   const [selectedRevId, setSelectedRevId] = useState<string>("");
   const [name, setName] = useState("New Workflow");
   const [baselineName, setBaselineName] = useState("New Workflow");
-  const [baselineGraphJson, setBaselineGraphJson] = useState(() => JSON.stringify(graphState.value));
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [issues, setIssues] = useState<ValidationIssue[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -637,6 +482,7 @@ export function AgentEditorPage(props: {
       const next = applyNodeChanges(changes, prev);
       const shouldPersist = changes.some((change) => change.type === "remove");
       if (shouldPersist) {
+        setHasUnsavedChanges(true);
         setGraph((g) => {
           const nodeIds = new Set(next.map((node) => node.id));
           const nodes = g.nodes.filter((node) => nodeIds.has(node.id));
@@ -651,6 +497,7 @@ export function AgentEditorPage(props: {
   const onNodeDragStop: OnNodeDrag = useCallback((_, dragged) => {
     // For groups, just sync their position to the graph (no reparenting logic)
     if (dragged.type === "group") {
+      setHasUnsavedChanges(true);
       setGraph((g) => ({
         ...g,
         nodes: g.nodes.map((n) =>
@@ -667,6 +514,7 @@ export function AgentEditorPage(props: {
       const loopGroupNodes = prev.filter((n) => n.type === "group");
       if (loopGroupNodes.length === 0) {
         // No groups, but still sync all positions to the graph to prevent position drift
+        setHasUnsavedChanges(true);
         setGraph((g) => ({
           ...g,
           nodes: g.nodes.map((n) => {
@@ -752,6 +600,7 @@ export function AgentEditorPage(props: {
 
       // If parent didn't change, just sync all positions to the graph
       if (nextParentId === prevParentId) {
+        setHasUnsavedChanges(true);
         setGraph((g) => ({
           ...g,
           nodes: g.nodes.map((n) => {
@@ -783,6 +632,7 @@ export function AgentEditorPage(props: {
 
       // Update the graph state with new parent_id and position for the dragged node,
       // AND sync positions for all other nodes to prevent position drift
+      setHasUnsavedChanges(true);
       setGraph((g) => ({
         ...g,
         nodes: g.nodes.map((n) => {
@@ -807,6 +657,7 @@ export function AgentEditorPage(props: {
       const next = applyEdgeChanges(changes, prev);
       const shouldPersist = changes.some((change) => change.type === "add" || change.type === "remove");
       if (shouldPersist) {
+        setHasUnsavedChanges(true);
         setGraph((g) => {
           const nodeIds = new Set(g.nodes.map((node) => node.id));
           const edges = edgesFromFlow(next).filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
@@ -835,6 +686,7 @@ export function AgentEditorPage(props: {
         return prev;
       }
       const nextEdges = addEdge(params, prev);
+      setHasUnsavedChanges(true);
       setGraph((g) => {
         const nodeIds = new Set(g.nodes.map((node) => node.id));
         const edges = edgesFromFlow(nextEdges).filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
@@ -866,6 +718,16 @@ export function AgentEditorPage(props: {
   );
   const nodeTypes: NodeTypes = useMemo(() => ({ agentNode: AgentFlowNode, group: LoopGroupFlowNode }), []);
 
+  const onUndo = useCallback(() => {
+    setHasUnsavedChanges(true);
+    graphState.undo();
+  }, [graphState]);
+
+  const onRedo = useCallback(() => {
+    setHasUnsavedChanges(true);
+    graphState.redo();
+  }, [graphState]);
+
   async function saveRevision() {
     setBusy(true);
     const req: AgentRevisionCreateRequest = {
@@ -883,6 +745,7 @@ export function AgentEditorPage(props: {
       setIssues(null);
       await refreshRevisions();
       selectRevision(res.id);
+      setHasUnsavedChanges(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1006,14 +869,17 @@ export function AgentEditorPage(props: {
   }
 
   function addNode(type: AgentGraphNode["type"]) {
+    setHasUnsavedChanges(true);
     setGraph((g) => ({ ...g, nodes: [...g.nodes, newNode(type, g.nodes.length)] }));
   }
 
   function updateNode(next: AgentGraphNode) {
+    setHasUnsavedChanges(true);
     setGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === next.id ? next : n)) }));
   }
 
   function updateEdgeLabel(edgeId: string, label: string) {
+    setHasUnsavedChanges(true);
     setGraph((g) => ({
       ...g,
       edges: g.edges.map((e) => (e.id === edgeId ? { ...e, label } : e)),
@@ -1021,6 +887,7 @@ export function AgentEditorPage(props: {
   }
 
   function deleteNode(nodeId: string) {
+    setHasUnsavedChanges(true);
     setGraph((g) => ({
       ...g,
       nodes: g.nodes.filter((n) => n.id !== nodeId),
@@ -1032,6 +899,7 @@ export function AgentEditorPage(props: {
   }
 
   function deleteEdge(edgeId: string) {
+    setHasUnsavedChanges(true);
     setGraph((g) => ({
       ...g,
       edges: g.edges.filter((ed) => ed.id !== edgeId),
@@ -1052,7 +920,7 @@ export function AgentEditorPage(props: {
     }
     const nextGraph = migrateLegacyGraph(spec.graph);
     setGraph(nextGraph);
-    setBaselineGraphJson(JSON.stringify(nextGraph));
+    setHasUnsavedChanges(false);
     graphState.clearHistory();
     const nextName = rev.name || "New Workflow";
     setName(nextName);
@@ -1067,7 +935,7 @@ export function AgentEditorPage(props: {
 
   async function createNewWorkflow() {
     setGraph(DEFAULT_GRAPH);
-    setBaselineGraphJson(JSON.stringify(DEFAULT_GRAPH));
+    setHasUnsavedChanges(true);
     graphState.clearHistory();
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
@@ -1088,17 +956,13 @@ export function AgentEditorPage(props: {
       });
       await refreshRevisions();
       selectRevision(res.id);
+      setHasUnsavedChanges(false);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
   }
-
-  const graphJson = useMemo(() => JSON.stringify(graph), [graph]);
-  const nameChanged = name.trim() !== baselineName.trim();
-  const graphChanged = graphJson !== baselineGraphJson;
-  const isUnsaved = nameChanged || graphChanged;
 
   const activeWorkflowName = useMemo(() => {
     const selected = revs?.find((rev) => rev.id === selectedRevId);
@@ -1151,16 +1015,23 @@ export function AgentEditorPage(props: {
           <div className="asCardBody">
             <label className="asField">
               <div className="asFieldLabel">Name</div>
-              <input className="asInput" value={name} onChange={(e) => setName(e.currentTarget.value)} />
+              <input
+                className="asInput"
+                value={name}
+                onChange={(e) => {
+                  setName(e.currentTarget.value);
+                  setHasUnsavedChanges(true);
+                }}
+              />
             </label>
             <div className="asRow">
               <button className="asBtn" onClick={createNewWorkflow} disabled={busy}>
                 New workflow
               </button>
-              <button className="asBtn primary" onClick={saveRevision} disabled={busy || !isUnsaved}>
+              <button className="asBtn primary" onClick={saveRevision} disabled={busy || !hasUnsavedChanges}>
                 Save
               </button>
-              {isUnsaved ? <div className="asMuted">(Unsaved changes)</div> : null}
+              {hasUnsavedChanges ? <div className="asMuted">(Unsaved changes)</div> : null}
             </div>
           </div>
         </div>
@@ -1221,8 +1092,7 @@ export function AgentEditorPage(props: {
                   <button
                     className="asBtn danger"
                     onClick={() => {
-                      setGraph((g) => ({ ...g, edges: g.edges.filter((ed) => ed.id !== selectedEdge.id) }));
-                      setSelectedEdgeId(null);
+                      deleteEdge(selectedEdge.id);
                     }}
                   >
                     Delete edge
@@ -1262,10 +1132,10 @@ export function AgentEditorPage(props: {
         <div className="asEditorCanvas">
           <div className="asCanvasToolbar">
             <div className="asRow">
-              <button className="asBtn sm" onClick={graphState.undo} disabled={!graphState.canUndo}>
+              <button className="asBtn sm" onClick={onUndo} disabled={!graphState.canUndo}>
                 Undo
               </button>
-              <button className="asBtn sm" onClick={graphState.redo} disabled={!graphState.canRedo}>
+              <button className="asBtn sm" onClick={onRedo} disabled={!graphState.canRedo}>
                 Redo
               </button>
               <button className="asBtn sm" onClick={openExportJson}>
@@ -1508,420 +1378,6 @@ export function AgentEditorPage(props: {
           </div>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function NodeInspector(props: {
-  node: AgentGraphNode;
-  issues: ValidationIssue[];
-  onChange: (node: AgentGraphNode) => void;
-  onDelete: (nodeId: string) => void;
-  settings: AppSettings;
-  helpOpen: boolean;
-  loopGroups: AgentGraphNode[];
-}) {
-  const { node, issues, onChange, onDelete, settings, helpOpen, loopGroups } = props;
-  const [schemaText, setSchemaText] = useState(() =>
-    node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
-  );
-  const isModelNode = node.type === "agent";
-  const [inputGuardrailsText, setInputGuardrailsText] = useState(() =>
-    node.type === "agent" ? prettyJson(node.input_guardrails ?? []) : "[]",
-  );
-  const [outputGuardrailsText, setOutputGuardrailsText] = useState(() =>
-    node.type === "agent" ? prettyJson(node.output_guardrails ?? []) : "[]",
-  );
-  const [outputTypeText, setOutputTypeText] = useState(() =>
-    node.type === "agent" ? prettyJson(node.output_type ?? {}) : "{}",
-  );
-
-  useEffect(() => {
-    if (node.type === "tool") {
-      setSchemaText(prettyJson(node.schema ?? {}));
-    }
-    if (node.type === "agent") {
-      setInputGuardrailsText(prettyJson(node.input_guardrails ?? []));
-      setOutputGuardrailsText(prettyJson(node.output_guardrails ?? []));
-      setOutputTypeText(prettyJson(node.output_type ?? {}));
-    }
-  }, [node]);
-
-  const modelProvider = useMemo<LlmProvider>(() => {
-    if (!isModelNode) return settings.llmProvider;
-    const model = node.model ?? {};
-    if (typeof model !== "object" || Array.isArray(model) || !model) return settings.llmProvider;
-    const provider = (model as { provider?: unknown }).provider;
-    return isLlmProvider(provider) ? provider : settings.llmProvider;
-  }, [node, settings.llmProvider, isModelNode]);
-
-  const modelName = useMemo(() => {
-    if (!isModelNode) return "";
-    const model = node.model ?? {};
-    if (typeof model !== "object" || Array.isArray(model) || !model) return "";
-    return typeof (model as { name?: unknown }).name === "string" ? ((model as { name?: string }).name ?? "") : "";
-  }, [node, isModelNode]);
-
-  // Fetch models from provider API
-  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
-  const [modelsFetchError, setModelsFetchError] = useState<string | null>(null);
-  const [isFetchingModels, setIsFetchingModels] = useState(false);
-
-  const connectionConfig = settings.llmConnections[modelProvider];
-  useEffect(() => {
-    if (!isModelNode) return;
-    let cancelled = false;
-    setIsFetchingModels(true);
-    setModelsFetchError(null);
-
-    fetchModelsFromProvider(modelProvider, connectionConfig).then((result) => {
-      if (cancelled) return;
-      setIsFetchingModels(false);
-      if (result.ok) {
-        setFetchedModels(result.models);
-        setModelsFetchError(null);
-      } else {
-        setFetchedModels([]);
-        setModelsFetchError(result.error);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [modelProvider, connectionConfig, isModelNode]);
-
-  const modelOptions = useMemo(() => {
-    // Prioritize fetched models, fall back to hardcoded defaults
-    const base = fetchedModels.length > 0 ? fetchedModels : (MODEL_OPTIONS[modelProvider] ?? []);
-    const next = [...base];
-    const preferredModel = settings.llmConnections[modelProvider]?.model?.trim() ?? "";
-    for (const candidate of [preferredModel, modelName]) {
-      if (candidate && !next.includes(candidate)) {
-        next.unshift(candidate);
-      }
-    }
-    return next;
-  }, [modelProvider, modelName, settings.llmConnections, fetchedModels]);
-
-  function updateLlmModel(nextProvider: LlmProvider, nextName: string) {
-    if (!isModelNode) return;
-    const nextModel = {
-      ...(node.model as Record<string, unknown> | undefined),
-      provider: nextProvider,
-      name: nextName,
-    };
-    updateModelNode({ model: nextModel });
-  }
-
-  function updateModelNode(next: Partial<AgentNode>) {
-    if (!isModelNode) return;
-    onChange({ ...node, ...next });
-  }
-
-  function updateTool(next: Partial<ToolNode>) {
-    if (node.type !== "tool") return;
-    onChange({ ...node, ...next });
-  }
-
-  return (
-    <div className="asStack">
-      {issues.length > 0 ? (
-        <div className="asIssueList">
-          {issues.map((issue, idx) => (
-            <div key={`${issue.code}-${idx}`} className="asIssueItem">
-              <span className="asMono">{issue.code}</span> {issue.message}
-            </div>
-          ))}
-        </div>
-      ) : null}
-      {helpOpen ? (
-        <div className="asHelpPanel">
-          <div className="asHelpPanelTitle">{NODE_HELP[node.type].title}</div>
-          <div className="asHelpPanelBody">
-            <div className="asHelpPanelSummary">{NODE_HELP[node.type].summary}</div>
-            <div className="asHelpPanelSection">
-              <div className="asHelpPanelLabel">Connections</div>
-              <ul>
-                {NODE_HELP[node.type].connections.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="asHelpPanelSection">
-              <div className="asHelpPanelLabel">Fields</div>
-              <ul>
-                {NODE_HELP[node.type].fields.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="asHelpPanelSection">
-              <div className="asHelpPanelLabel">Tips</div>
-              <ul>
-                {NODE_HELP[node.type].tips.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      <label className="asField">
-        <div className="asFieldLabel">Name</div>
-        <input
-          className="asInput"
-          value={node.name ?? ""}
-          onChange={(e) => {
-            const nextName = e.currentTarget.value;
-            if (node.type === "tool") {
-              onChange({ ...node, name: nextName, tool_name: nextName });
-            } else {
-              onChange({ ...node, name: nextName });
-            }
-          }}
-        />
-      </label>
-
-      {node.type !== "loop_group" ? (
-        <label className="asField">
-          <div className="asFieldLabel">Parent loop group</div>
-          <select
-            className="asSelect"
-            value={typeof (node as { parent_id?: unknown }).parent_id === "string" ? (node as { parent_id?: string }).parent_id : ""}
-            onChange={(e) => {
-              const nextParent = e.currentTarget.value || undefined;
-              onChange({ ...node, parent_id: nextParent });
-            }}
-          >
-            <option value="">None</option>
-            {loopGroups
-              .filter((group) => group.id !== node.id)
-              .map((group) => (
-                <option key={group.id} value={group.id}>
-                  {group.name || group.id}
-                </option>
-              ))}
-          </select>
-        </label>
-      ) : null}
-
-      {node.type === "loop_group" ? (
-        <>
-          <label className="asField">
-            <div className="asFieldLabel">Condition</div>
-            <textarea
-              className="asTextarea"
-              rows={3}
-              value={node.condition ?? ""}
-              onChange={(e) => onChange({ ...node, condition: e.currentTarget.value })}
-            />
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Max iterations</div>
-            <input
-              className="asInput"
-              type="number"
-              min={1}
-              value={node.max_iterations ?? 1}
-              onChange={(e) => {
-                const nextValue = Number(e.currentTarget.value);
-                onChange({ ...node, max_iterations: Number.isFinite(nextValue) ? nextValue : 1 });
-              }}
-            />
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Width</div>
-            <input
-              className="asInput"
-              type="number"
-              min={200}
-              value={node.width ?? 360}
-              onChange={(e) => {
-                const nextValue = Number(e.currentTarget.value);
-                onChange({ ...node, width: Number.isFinite(nextValue) ? nextValue : 360 });
-              }}
-            />
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Height</div>
-            <input
-              className="asInput"
-              type="number"
-              min={160}
-              value={node.height ?? 240}
-              onChange={(e) => {
-                const nextValue = Number(e.currentTarget.value);
-                onChange({ ...node, height: Number.isFinite(nextValue) ? nextValue : 240 });
-              }}
-            />
-          </label>
-        </>
-      ) : null}
-
-      {isModelNode ? (
-        <>
-          <label className="asField">
-            <div className="asFieldLabel">Instructions</div>
-            <textarea
-              className="asTextarea"
-              rows={6}
-              value={node.instructions ?? ""}
-              onChange={(e) => updateModelNode({ instructions: e.currentTarget.value })}
-            />
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Provider</div>
-            <select
-              className="asSelect"
-              value={modelProvider}
-              onChange={(e) => {
-                const nextProvider = e.currentTarget.value as LlmProvider;
-                const nextName = (MODEL_OPTIONS[nextProvider]?.[0] ?? modelName ?? "").trim();
-                updateLlmModel(nextProvider, nextName);
-              }}
-            >
-              {LLM_PROVIDERS.map((provider) => (
-                <option key={provider} value={provider}>
-                  {LLM_PROVIDER_LABELS[provider]}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">
-              Model
-              {isFetchingModels ? (
-                <span className="asFieldHint"> (loading...)</span>
-              ) : modelsFetchError ? (
-                <span className="asFieldHint asFieldHintWarn" title={modelsFetchError}> (using defaults)</span>
-              ) : fetchedModels.length > 0 ? (
-                <span className="asFieldHint"> ({fetchedModels.length} available)</span>
-              ) : null}
-            </div>
-            <select
-              className="asSelect"
-              value={modelName || modelOptions[0] || ""}
-              onChange={(e) => {
-                const nextName = e.currentTarget.value;
-                updateLlmModel(modelProvider, nextName);
-              }}
-            >
-              {modelOptions.map((name) => (
-                <option key={name} value={name}>
-                  {name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Workspace root (optional)</div>
-            <div className="asRow">
-              <input
-                className="asInput"
-                placeholder="Select a folder or enter a path"
-                value={node.workspace_root ?? ""}
-                onChange={(e) => updateModelNode({ workspace_root: e.currentTarget.value })}
-              />
-              <button
-                className="asBtn"
-                type="button"
-                onClick={async () => {
-                  const folder = await (window as any).agentStudio.selectFolder();
-                  if (folder) {
-                    updateModelNode({ workspace_root: folder });
-                  }
-                }}
-              >
-                Select folder
-              </button>
-            </div>
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Input guardrails (JSON)</div>
-            <textarea
-              className="asTextarea"
-              rows={4}
-              value={inputGuardrailsText}
-              onChange={(e) => setInputGuardrailsText(e.currentTarget.value)}
-              onBlur={() => {
-                const parsed = tryParseJsonValue(inputGuardrailsText);
-                if (parsed.ok && Array.isArray(parsed.value)) {
-                  updateModelNode({ input_guardrails: parsed.value as AgentNode["input_guardrails"] });
-                }
-              }}
-            />
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Output guardrails (JSON)</div>
-            <textarea
-              className="asTextarea"
-              rows={4}
-              value={outputGuardrailsText}
-              onChange={(e) => setOutputGuardrailsText(e.currentTarget.value)}
-              onBlur={() => {
-                const parsed = tryParseJsonValue(outputGuardrailsText);
-                if (parsed.ok && Array.isArray(parsed.value)) {
-                  updateModelNode({ output_guardrails: parsed.value as AgentNode["output_guardrails"] });
-                }
-              }}
-            />
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Output schema (JSON)</div>
-            <textarea
-              className="asTextarea"
-              rows={4}
-              value={outputTypeText}
-              onChange={(e) => setOutputTypeText(e.currentTarget.value)}
-              onBlur={() => {
-                const parsed = tryParseJsonValue(outputTypeText);
-                if (parsed.ok && parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)) {
-                  updateModelNode({ output_type: parsed.value as Record<string, unknown> });
-                }
-              }}
-            />
-          </label>
-        </>
-      ) : null}
-
-      {node.type === "tool" ? (
-        <>
-          <label className="asField">
-            <div className="asFieldLabel">Language</div>
-            <select className="asSelect" value={node.language ?? "python"} onChange={(e) => updateTool({ language: e.currentTarget.value })}>
-              <option value="python">Python</option>
-            </select>
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Description</div>
-            <textarea className="asTextarea" rows={4} value={node.description ?? ""} onChange={(e) => updateTool({ description: e.currentTarget.value })} />
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Code</div>
-            <textarea className="asTextarea" rows={8} value={node.code ?? ""} onChange={(e) => updateTool({ code: e.currentTarget.value })} />
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Schema JSON</div>
-            <textarea
-              className="asTextarea"
-              rows={4}
-              value={schemaText}
-              onChange={(e) => setSchemaText(e.currentTarget.value)}
-              onBlur={() => {
-                const parsed = tryParseJsonObject(schemaText);
-                if (parsed.ok) updateTool({ schema: parsed.value });
-              }}
-            />
-          </label>
-        </>
-      ) : null}
-
-      <div className="asRow">
-        <button className="asBtn danger" onClick={() => onDelete(node.id)}>
-          Delete node
-        </button>
-      </div>
     </div>
   );
 }
