@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -108,7 +109,13 @@ def build_screenshot_tools(*, service: ScreenshotService) -> list[FunctionTool]:
             wait_for=wait_for,
             delay_ms=delay_ms,
         )
-        return {"path": result.path, "width": result.width, "height": result.height}
+        data_url = _build_data_url(Path(result.path))
+        return {
+            "path": result.path,
+            "width": result.width,
+            "height": result.height,
+            "data_url": data_url,
+        }
 
     return [
         _make_tool(
@@ -158,3 +165,11 @@ def _make_tool(name: str, description: str, params_schema: dict[str, Any], handl
         on_invoke_tool=_on_invoke,
         strict_json_schema=True,
     )
+
+
+def _build_data_url(path: Path) -> str:
+    if not path.exists():
+        return ""
+    raw = path.read_bytes()
+    encoded = base64.b64encode(raw).decode("ascii")
+    return f"data:image/png;base64,{encoded}"

@@ -1,6 +1,6 @@
 import "./App.css";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AgentNode,
   AgentRevisionResponse,
@@ -27,18 +27,28 @@ import { TraceViewer } from "./components/TraceViewer";
 type Route = "editor" | "runner" | "dashboard" | "settings";
 
 function App() {
-  const [route, setRoute] = useState<Route>("editor");
+  const [route, setRoute] = useState<Route>("dashboard");
   const [settings, setSettings] = useState(() => loadSettings());
   const backend: BackendConfig = useMemo(() => ({ baseUrl: settings.backendBaseUrl }), [settings.backendBaseUrl]);
 
   // Shared “recent runs” list (frontend-side, since backend MVP doesn’t have list-runs yet).
   const [recentRunIds, setRecentRunIds] = useState<string[]>(() => settings.recentRunIds);
+  const [editorRevs, setEditorRevs] = useState<AgentRevisionResponse[]>([]);
+  const [editorSelectedRevisionId, setEditorSelectedRevisionId] = useState("");
   useEffect(() => {
     const next = { ...settings, recentRunIds };
     setSettings(next);
     saveSettings(next);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recentRunIds]);
+
+  const workflows = useMemo(() => buildWorkflows(editorRevs), [editorRevs]);
+
+  const refreshEditorRevs = useCallback(async () => {
+    const list = await api(backend).listAgentRevisions();
+    setEditorRevs(list);
+    return list;
+  }, [backend]);
 
   // Global health status
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -73,6 +83,23 @@ function App() {
     };
   }, [backend.baseUrl]);
 
+  // Show loading screen while waiting for backend
+  if (!health) {
+    return (
+      <div className="asApp">
+        <div className="asLoadingScreen">
+          <div className="asLoadingContent">
+            <div className="asBrandTitle">LLM Agent Studio</div>
+            <div className="asLoadingSpinner" />
+            {healthErr ? (
+              <div className="asLoadingError">{healthErr}</div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="asApp">
       <aside className="asSidebar">
@@ -84,9 +111,62 @@ function App() {
         <nav className="asNav">
           <NavItem active={route === "dashboard"} onClick={() => setRoute("dashboard")} label="Dashboard" />
           <NavItem active={route === "runner"} onClick={() => setRoute("runner")} label="Agent runner" />
-          <NavItem active={route === "editor"} onClick={() => setRoute("editor")} label="Agent editor" />
+          <NavItem active={route === "editor"} onClick={() => setRoute("editor")} label="Workflow editor" />
           <NavItem active={route === "settings"} onClick={() => setRoute("settings")} label="Settings" />
         </nav>
+
+        {route === "editor" ? (
+          <div className="asSidebarSection">
+            <div className="asSidebarSectionTitle">Workflows</div>
+            {workflows.length > 0 ? (
+              <div className="asWorkflowList">
+                {workflows.map((rev) => (
+                  <button
+                    key={rev.id}
+                    className={`asWorkflowItem${editorSelectedRevisionId === rev.id ? " active" : ""}`}
+                    onClick={() => setEditorSelectedRevisionId(rev.id)}
+                  >
+                    <div className="asWorkflowName">{rev.name}</div>
+                    <div className="asWorkflowMeta">
+                      {formatRelativeTime(rev.created_at)}
+                      <button
+                        className="asWorkflowDelete"
+                        type="button"
+                        aria-label={`Delete ${rev.name}`}
+                        onClick={async (event) => {
+                          event.stopPropagation();
+                          if (!window.confirm(`Delete workflow "${rev.name}" and all revisions?`)) return;
+                          await api(backend).deleteWorkflow(rev.name);
+                          const updated = await refreshEditorRevs();
+                          if (editorSelectedRevisionId === rev.id) {
+                            const nextWorkflows = buildWorkflows(updated).filter((it) => it.id !== rev.id);
+                            setEditorSelectedRevisionId(nextWorkflows[0]?.id ?? "");
+                          }
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                          <path
+                            d="M9 3h6l1 2h4v2H4V5h4l1-2zm2 7h2v7h-2v-7zm-4 0h2v7H7v-7zm8 0h2v7h-2v-7z"
+                            fill="currentColor"
+                          />
+                          <path
+                            d="M6 7h12l-1 13H7L6 7z"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="asMuted asSmall">No saved workflows yet.</div>
+            )}
+          </div>
+        ) : null}
 
         <div className="asSidebarFooter">
           <div className="asPill">
@@ -101,23 +181,14 @@ function App() {
       </aside>
 
       <main className="asMain">
-        {healthErr ? (
-          <Banner tone="warn" title="Backend not reachable">
-            <div className="asBannerBody">
-              <div className="asMono asSmall">{healthErr}</div>
-              <div className="asSmall">
-                If this is a CORS issue in Tauri dev, set <span className="asMono">AGENT_STUDIO_ALLOW_CORS_ORIGINS</span>{" "}
-                to include your UI origin (commonly <span className="asMono">http://localhost:1420</span>).
-              </div>
-            </div>
-          </Banner>
-        ) : null}
-
         {route === "editor" ? (
           <AgentEditorPage
             backend={backend}
             settings={settings}
             onStartRun={(runId) => setRecentRunIds((s) => uniq([runId, ...s]).slice(0, 50))}
+            selectedRevisionId={editorSelectedRevisionId}
+            onSelectRevision={setEditorSelectedRevisionId}
+            onRevisionsChange={setEditorRevs}
           />
         ) : null}
         {route === "runner" ? (
@@ -135,6 +206,57 @@ function App() {
 }
 
 export default App;
+
+function formatRelativeTime(isoTime: string): string {
+  const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
+  const date = parseIsoDate(isoTime);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  const diffMs = Date.now() - date.getTime();
+  const diffSeconds = Math.round(diffMs / 1000);
+  const thresholds: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+    ["year", 60 * 60 * 24 * 365],
+    ["month", 60 * 60 * 24 * 30],
+    ["week", 60 * 60 * 24 * 7],
+    ["day", 60 * 60 * 24],
+    ["hour", 60 * 60],
+    ["minute", 60],
+    ["second", 1],
+  ];
+  for (const [unit, secondsInUnit] of thresholds) {
+    if (Math.abs(diffSeconds) >= secondsInUnit || unit === "second") {
+      return rtf.format(-Math.round(diffSeconds / secondsInUnit), unit);
+    }
+  }
+  return rtf.format(0, "second");
+}
+
+function parseIsoDate(value: string): Date {
+  const trimmed = value.trim();
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(trimmed);
+  return new Date(hasZone ? trimmed : `${trimmed}Z`);
+}
+
+function isoTimestamp(value: string): number {
+  const ts = parseIsoDate(value).getTime();
+  return Number.isNaN(ts) ? 0 : ts;
+}
+
+function buildWorkflows(revisions: AgentRevisionResponse[]): AgentRevisionResponse[] {
+  const unique = revisions.reduce<Record<string, AgentRevisionResponse>>((acc, rev) => {
+    const existing = acc[rev.name];
+    if (!existing) {
+      acc[rev.name] = rev;
+      return acc;
+    }
+    const existingTime = isoTimestamp(existing.created_at);
+    const nextTime = isoTimestamp(rev.created_at);
+    if (Number.isNaN(existingTime) || nextTime > existingTime) {
+      acc[rev.name] = rev;
+    }
+    return acc;
+  }, {});
+  return Object.values(unique).sort((a, b) => isoTimestamp(b.created_at) - isoTimestamp(a.created_at));
+}
 
 function NavItem(props: { active: boolean; label: string; onClick: () => void }) {
   return (

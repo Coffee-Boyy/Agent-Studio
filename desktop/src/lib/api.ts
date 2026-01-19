@@ -64,6 +64,10 @@ export function api(cfg: BackendConfig) {
       return fetchJson(joinUrl(cfg.baseUrl, `/v1/agent-revisions/${encodeURIComponent(revisionId)}`));
     },
 
+    async deleteWorkflow(name: string): Promise<{ deleted: number }> {
+      return fetchJson(joinUrl(cfg.baseUrl, `/v1/workflows/${encodeURIComponent(name)}`), { method: "DELETE" });
+    },
+
     async createRun(req: RunCreateRequest): Promise<RunResponse> {
       return fetchJson(joinUrl(cfg.baseUrl, "/v1/runs"), { method: "POST", body: JSON.stringify(req) });
     },
@@ -72,10 +76,16 @@ export function api(cfg: BackendConfig) {
       return fetchJson(joinUrl(cfg.baseUrl, `/v1/runs/${encodeURIComponent(runId)}`));
     },
 
-    async listRuns(limit = 100, offset = 0): Promise<RunResponse[]> {
+    async listRuns(limit = 100, offset = 0, opts?: { revisionId?: string; workflowName?: string }): Promise<RunResponse[]> {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
       params.set("offset", String(offset));
+      if (opts?.revisionId) {
+        params.set("revision_id", opts.revisionId);
+      }
+      if (opts?.workflowName) {
+        params.set("workflow_name", opts.workflowName);
+      }
       return fetchJson(joinUrl(cfg.baseUrl, `/v1/runs?${params.toString()}`));
     },
 

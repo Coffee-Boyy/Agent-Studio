@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from sqlmodel import Session, select
 
-from agent_studio_backend.models import Run, RunEvent, now_utc
+from agent_studio_backend.models import AgentRevision, Run, RunEvent, now_utc
 from agent_studio_backend.services.event_bus import EVENT_BUS
 from agent_studio_backend.services.executor import DEFAULT_EXECUTOR, Executor
 
@@ -65,10 +65,21 @@ class RunService:
         session: Session,
         *,
         revision_id: Optional[str] = None,
+        workflow_name: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Run]:
-        stmt = select(Run).order_by(Run.started_at.desc()).offset(offset).limit(limit)
+        if workflow_name:
+            stmt = (
+                select(Run)
+                .join(AgentRevision, AgentRevision.id == Run.agent_revision_id)
+                .where(AgentRevision.name == workflow_name)
+                .order_by(Run.started_at.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+        else:
+            stmt = select(Run).order_by(Run.started_at.desc()).offset(offset).limit(limit)
         if revision_id:
             stmt = stmt.where(Run.agent_revision_id == revision_id)
         return list(session.exec(stmt).all())

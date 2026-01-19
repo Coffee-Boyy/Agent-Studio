@@ -114,6 +114,7 @@ export function TraceViewer(props: {
 function EventRow(props: { ev: RunEventResponse }) {
   const payload = useMemo(() => prettyJson(props.ev.payload_json), [props.ev.payload_json]);
   const eventName = useMemo(() => extractEventName(props.ev.payload_json), [props.ev.payload_json]);
+  const screenshotUrl = useMemo(() => findImageDataUrl(props.ev.payload_json), [props.ev.payload_json]);
   return (
     <details className="asEvent">
       <summary className="asEventSummary">
@@ -124,6 +125,11 @@ function EventRow(props: { ev: RunEventResponse }) {
         </span>
         <span className="asEventTime">{formatDateTime(props.ev.created_at)}</span>
       </summary>
+      {screenshotUrl ? (
+        <div className="asEventImageWrap">
+          <img className="asEventImage" src={screenshotUrl} alt="Screenshot from tool run" />
+        </div>
+      ) : null}
       <pre className="asEventPayload">{payload}</pre>
     </details>
   );
@@ -142,6 +148,25 @@ function extractEventName(payload: Record<string, unknown> | null | undefined): 
   if (agent && typeof agent === "object" && "name" in agent) {
     const nestedName = (agent as { name?: unknown }).name;
     if (typeof nestedName === "string" && nestedName.trim()) return nestedName.trim();
+  }
+  return null;
+}
+
+function findImageDataUrl(payload: Record<string, unknown> | null | undefined): string | null {
+  if (!payload) return null;
+  const direct = payload.data_url;
+  if (typeof direct === "string" && direct.startsWith("data:image/")) {
+    return direct;
+  }
+  for (const value of Object.values(payload)) {
+    if (!value) continue;
+    if (typeof value === "string" && value.startsWith("data:image/")) {
+      return value;
+    }
+    if (typeof value === "object") {
+      const nested = findImageDataUrl(value as Record<string, unknown>);
+      if (nested) return nested;
+    }
   }
   return null;
 }

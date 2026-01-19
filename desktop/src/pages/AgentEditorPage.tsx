@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import {
   addEdge,
   applyEdgeChanges,
@@ -24,6 +25,7 @@ import { formatDateTime, prettyJson, tryParseJsonObject } from "../lib/json";
 import {
   buildLlmConnectionPayload,
   DEFAULT_LLM_PROVIDER,
+  fetchModelsFromProvider,
   isLlmProvider,
   LLM_PROVIDERS,
   LLM_PROVIDER_LABELS,
@@ -61,7 +63,6 @@ const DEFAULT_GRAPH: AgentGraphDocV1 = {
       instructions: "You are a helpful agent.",
       model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
       tools: [],
-      temperature: 0.3,
       input_guardrails: [],
       output_guardrails: [],
       output_type: null,
@@ -90,11 +91,30 @@ function buildEnvelope(graph: AgentGraphDocV1): AgentSpecEnvelope {
   };
 }
 
+function formatInputPreview(inputs: Record<string, unknown>): string {
+  const rawInput = inputs?.input;
+  let preview = "";
+  if (typeof rawInput === "string") {
+    preview = rawInput;
+  } else {
+    try {
+      preview = JSON.stringify(inputs);
+    } catch {
+      preview = "[unserializable inputs]";
+    }
+  }
+  const singleLine = preview.replace(/\s+/g, " ").trim();
+  if (!singleLine) return "";
+  return singleLine.length > 120 ? `${singleLine.slice(0, 117)}...` : singleLine;
+}
+
 function formatRelativeTime(isoTime: string): string {
   const rtf = new Intl.RelativeTimeFormat("en", { numeric: "auto" });
-  const date = new Date(isoTime);
+  const trimmed = isoTime.trim();
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(trimmed);
+  const date = new Date(hasZone ? trimmed : `${trimmed}Z`);
   if (Number.isNaN(date.getTime())) return "unknown";
-  const diffMs = date.getTime() - Date.now();
+  const diffMs = Date.now() - date.getTime();
   const diffSeconds = Math.round(diffMs / 1000);
   const thresholds: Array<[Intl.RelativeTimeFormatUnit, number]> = [
     ["year", 60 * 60 * 24 * 365],
@@ -111,23 +131,6 @@ function formatRelativeTime(isoTime: string): string {
     }
   }
   return rtf.format(0, "second");
-}
-
-function formatInputPreview(inputs: Record<string, unknown>): string {
-  const rawInput = inputs?.input;
-  let preview = "";
-  if (typeof rawInput === "string") {
-    preview = rawInput;
-  } else {
-    try {
-      preview = JSON.stringify(inputs);
-    } catch {
-      preview = "[unserializable inputs]";
-    }
-  }
-  const singleLine = preview.replace(/\s+/g, " ").trim();
-  if (!singleLine) return "";
-  return singleLine.length > 120 ? `${singleLine.slice(0, 117)}...` : singleLine;
 }
 
 function tryParseJsonValue(text: string): { ok: boolean; value: unknown } {
@@ -197,7 +200,6 @@ function newNode(type: AgentGraphNode["type"], idx: number): AgentGraphNode {
       instructions: "",
       model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
       tools: [],
-      temperature: 0.2,
       input_guardrails: [],
       output_guardrails: [],
       output_type: null,
@@ -239,7 +241,6 @@ function migrateLegacyGraph(graph: AgentGraphDocV1): AgentGraphDocV1 {
         instructions: typeof node.system_prompt === "string" ? node.system_prompt : "",
         model: (node.model as Record<string, unknown>) ?? {},
         tools: Array.isArray(node.tools) ? (node.tools as string[]) : [],
-        temperature: typeof node.temperature === "number" ? node.temperature : null,
         input_guardrails: [],
         output_guardrails: [],
         output_type: null,
@@ -350,6 +351,9 @@ export function AgentEditorPage(props: {
   backend: BackendConfig;
   settings: AppSettings;
   onStartRun: (runId: string) => void;
+  selectedRevisionId?: string;
+  onSelectRevision?: (revId: string) => void;
+  onRevisionsChange?: (revs: AgentRevisionResponse[]) => void;
 }) {
   const graphState = useUndoRedoState<AgentGraphDocV1>(() => {
     const draft = loadAgentDraft();
@@ -363,7 +367,9 @@ export function AgentEditorPage(props: {
 
   const [revs, setRevs] = useState<AgentRevisionResponse[] | null>(null);
   const [selectedRevId, setSelectedRevId] = useState<string>("");
-  const [name, setName] = useState("Visual agent");
+  const [name, setName] = useState("New Workflow");
+  const [baselineName, setBaselineName] = useState("New Workflow");
+  const [baselineGraphJson, setBaselineGraphJson] = useState(() => JSON.stringify(graphState.value));
   const [issues, setIssues] = useState<ValidationIssue[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -436,46 +442,38 @@ export function AgentEditorPage(props: {
     try {
       const list = await api(props.backend).listAgentRevisions();
       setRevs(list);
+      props.onRevisionsChange?.(list);
     } catch (e) {
       setRevs(null);
     }
-  }, [props.backend]);
+  }, [props.backend, props.onRevisionsChange]);
 
   useEffect(() => {
     refreshRevisions();
   }, [refreshRevisions]);
 
+  const selectRevision = useCallback(
+    (revId: string) => {
+      setSelectedRevId(revId);
+      props.onSelectRevision?.(revId);
+      loadRevision(revId);
+    },
+    [loadRevision, props.onSelectRevision],
+  );
+
+  useEffect(() => {
+    if (!props.selectedRevisionId) return;
+    if (props.selectedRevisionId === selectedRevId) return;
+    setSelectedRevId(props.selectedRevisionId);
+    loadRevision(props.selectedRevisionId);
+  }, [props.selectedRevisionId, selectedRevId]);
+
   useEffect(() => {
     if (selectedRevId || !revs || revs.length === 0) return;
     const first = revs[0];
-    setSelectedRevId(first.id);
-    setName(first.name || "Visual agent");
-    loadRevision(first.id);
-  }, [revs, selectedRevId]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!selectedRevId) {
-      setTestRunHistory([]);
-      return () => {
-        cancelled = true;
-      };
-    }
-    async function loadRuns() {
-      try {
-        const runs = await api(props.backend).listRuns(5, 0);
-        if (cancelled) return;
-        setTestRunHistory(runs);
-      } catch {
-        if (cancelled) return;
-        setTestRunHistory([]);
-      }
-    }
-    loadRuns();
-    return () => {
-      cancelled = true;
-    };
-  }, [props.backend, selectedRevId]);
+    selectRevision(first.id);
+    setName(first.name || "New Workflow");
+  }, [revs, selectedRevId, selectRevision]);
 
   const onNodesChange: OnNodesChange = useCallback((changes) => {
     setFlowNodes((prev) => {
@@ -549,7 +547,7 @@ export function AgentEditorPage(props: {
       setErr(null);
       setIssues(null);
       await refreshRevisions();
-      setSelectedRevId(res.id);
+      selectRevision(res.id);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -588,7 +586,7 @@ export function AgentEditorPage(props: {
           spec_json: spec,
         });
         await refreshRevisions();
-        setSelectedRevId(res.id);
+        selectRevision(res.id);
         revisionId = res.id;
       }
       const llmConnection = buildLlmConnectionPayload(
@@ -717,20 +715,103 @@ export function AgentEditorPage(props: {
       setErr("Selected revision is not a graph-v1 spec.");
       return;
     }
-    setGraph(migrateLegacyGraph(spec.graph));
+    const nextGraph = migrateLegacyGraph(spec.graph);
+    setGraph(nextGraph);
+    setBaselineGraphJson(JSON.stringify(nextGraph));
     graphState.clearHistory();
+    const nextName = rev.name || "New Workflow";
+    setName(nextName);
+    setBaselineName(nextName);
     setErr(null);
     setIssues(null);
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
+    // Reset the graph editor viewport
+    setTimeout(() => flowRef.current?.fitView({ padding: 0.2, duration: 200 }), 50);
   }
+
+  async function createNewWorkflow() {
+    setGraph(DEFAULT_GRAPH);
+    setBaselineGraphJson(JSON.stringify(DEFAULT_GRAPH));
+    graphState.clearHistory();
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setSelectedRevId("");
+    props.onSelectRevision?.("");
+    setIssues(null);
+    setErr(null);
+    setName("New Workflow");
+    setBaselineName("New Workflow");
+    // Reset the graph editor viewport
+    setTimeout(() => flowRef.current?.fitView({ padding: 0.2, duration: 200 }), 50);
+
+    setBusy(true);
+    try {
+      const res = await api(props.backend).createAgentRevision({
+        name: "New Workflow",
+        spec_json: buildEnvelope(DEFAULT_GRAPH),
+      });
+      await refreshRevisions();
+      selectRevision(res.id);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const graphJson = useMemo(() => JSON.stringify(graph), [graph]);
+  const nameChanged = name.trim() !== baselineName.trim();
+  const graphChanged = graphJson !== baselineGraphJson;
+  const isUnsaved = nameChanged || graphChanged;
+
+  const activeWorkflowName = useMemo(() => {
+    const selected = revs?.find((rev) => rev.id === selectedRevId);
+    if (selected?.name) return selected.name;
+    const baseline = baselineName.trim();
+    return baseline || name.trim();
+  }, [revs, selectedRevId, baselineName, name]);
+
+  const workflowRevisions = useMemo(() => {
+    if (!revs || !activeWorkflowName) return [];
+    const trimmedName = activeWorkflowName.trim();
+    return revs
+      .filter((rev) => (rev.name || "").trim() === trimmedName)
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  }, [revs, activeWorkflowName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedRevId || !activeWorkflowName) {
+      setTestRunHistory([]);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    async function loadRuns() {
+      try {
+        const runs = await api(props.backend).listRuns(5, 0, { workflowName: activeWorkflowName });
+        if (cancelled) return;
+        setTestRunHistory(runs);
+      } catch {
+        if (cancelled) return;
+        setTestRunHistory([]);
+      }
+    }
+
+    loadRuns();
+    return () => {
+      cancelled = true;
+    };
+  }, [props.backend, selectedRevId, activeWorkflowName]);
 
   return (
     <div className="asEditor">
       <div className="asEditorLeft">
         <div className="asCard">
           <div className="asCardHeader">
-            <div className="asCardTitle">Agent editor</div>
+            <div className="asCardTitle">Workflow editor</div>
           </div>
           <div className="asCardBody">
             <label className="asField">
@@ -738,9 +819,13 @@ export function AgentEditorPage(props: {
               <input className="asInput" value={name} onChange={(e) => setName(e.currentTarget.value)} />
             </label>
             <div className="asRow">
-              <button className="asBtn primary" onClick={saveRevision} disabled={busy}>
+              <button className="asBtn" onClick={createNewWorkflow} disabled={busy}>
+                New workflow
+              </button>
+              <button className="asBtn primary" onClick={saveRevision} disabled={busy || !isUnsaved}>
                 Save
               </button>
+              {isUnsaved ? <div className="asMuted">(Unsaved changes)</div> : null}
             </div>
           </div>
         </div>
@@ -827,17 +912,19 @@ export function AgentEditorPage(props: {
               </button>
               <select
                 className="asSelect asSelectInline asSelectUnderline"
-                value={selectedRevId}
+                value={workflowRevisions.some((rev) => rev.id === selectedRevId) ? selectedRevId : ""}
                 onChange={(e) => {
                   const next = e.currentTarget.value;
-                  setSelectedRevId(next);
-                  loadRevision(next);
+                  if (!next) return;
+                  selectRevision(next);
                 }}
               >
-                <option value="">Load a previous revision...</option>
-                {(revs ?? []).map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {formatRelativeTime(r.created_at)} · {r.id.slice(0, 8)}
+                <option value="" disabled>
+                  {workflowRevisions.length ? "Select a revision..." : "No revisions yet"}
+                </option>
+                {workflowRevisions.map((rev, idx) => (
+                  <option key={rev.id} value={rev.id}>
+                    {idx === 0 ? "Latest" : "Revision"} · {formatRelativeTime(rev.created_at)} · {rev.id.slice(0, 8)}
                   </option>
                 ))}
               </select>
@@ -1003,7 +1090,13 @@ export function AgentEditorPage(props: {
               {testErr ? <div className="asIssueItem asCanvasErrorText">{testErr}</div> : null}
               <label className="asField">
                 <div className="asFieldLabel">Final output</div>
-                <textarea className="asTextarea" rows={6} value={testOutput} readOnly />
+                <div className="asMarkdown">
+                  {testOutput ? (
+                    <ReactMarkdown>{testOutput}</ReactMarkdown>
+                  ) : (
+                    <div className="asMuted">No output yet.</div>
+                  )}
+                </div>
               </label>
             </div>
           </div>
@@ -1065,7 +1158,6 @@ function NodeInspector(props: {
   settings: AppSettings;
 }) {
   const { node, issues, onChange, onDelete, settings } = props;
-  const workspacePickerRef = useRef<HTMLInputElement | null>(null);
   const [schemaText, setSchemaText] = useState(() =>
     node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
   );
@@ -1091,12 +1183,6 @@ function NodeInspector(props: {
     }
   }, [node]);
 
-  useEffect(() => {
-    if (!workspacePickerRef.current) return;
-    workspacePickerRef.current.setAttribute("webkitdirectory", "");
-    workspacePickerRef.current.setAttribute("directory", "");
-  }, []);
-
   const modelProvider = useMemo<LlmProvider>(() => {
     if (!isModelNode) return settings.llmProvider;
     const model = node.model ?? {};
@@ -1112,8 +1198,38 @@ function NodeInspector(props: {
     return typeof (model as { name?: unknown }).name === "string" ? ((model as { name?: string }).name ?? "") : "";
   }, [node, isModelNode]);
 
+  // Fetch models from provider API
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [modelsFetchError, setModelsFetchError] = useState<string | null>(null);
+  const [isFetchingModels, setIsFetchingModels] = useState(false);
+
+  const connectionConfig = settings.llmConnections[modelProvider];
+  useEffect(() => {
+    if (!isModelNode) return;
+    let cancelled = false;
+    setIsFetchingModels(true);
+    setModelsFetchError(null);
+
+    fetchModelsFromProvider(modelProvider, connectionConfig).then((result) => {
+      if (cancelled) return;
+      setIsFetchingModels(false);
+      if (result.ok) {
+        setFetchedModels(result.models);
+        setModelsFetchError(null);
+      } else {
+        setFetchedModels([]);
+        setModelsFetchError(result.error);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [modelProvider, connectionConfig, isModelNode]);
+
   const modelOptions = useMemo(() => {
-    const base = MODEL_OPTIONS[modelProvider] ?? [];
+    // Prioritize fetched models, fall back to hardcoded defaults
+    const base = fetchedModels.length > 0 ? fetchedModels : (MODEL_OPTIONS[modelProvider] ?? []);
     const next = [...base];
     const preferredModel = settings.llmConnections[modelProvider]?.model?.trim() ?? "";
     for (const candidate of [preferredModel, modelName]) {
@@ -1122,7 +1238,7 @@ function NodeInspector(props: {
       }
     }
     return next;
-  }, [modelProvider, modelName, settings.llmConnections]);
+  }, [modelProvider, modelName, settings.llmConnections, fetchedModels]);
 
   function updateLlmModel(nextProvider: LlmProvider, nextName: string) {
     if (!isModelNode) return;
@@ -1174,34 +1290,6 @@ function NodeInspector(props: {
       {isModelNode ? (
         <>
           <label className="asField">
-            <div className="asFieldLabel">Workspace root (optional)</div>
-            <div className="asRow">
-              <input
-                className="asInput"
-                placeholder="Select a folder or enter a path"
-                value={node.workspace_root ?? ""}
-                onChange={(e) => updateModelNode({ workspace_root: e.currentTarget.value })}
-              />
-              <button className="asBtn" type="button" onClick={() => workspacePickerRef.current?.click()}>
-                Choose folder
-              </button>
-            </div>
-            <input
-              ref={workspacePickerRef}
-              type="file"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const file = e.currentTarget.files?.[0] as (File & { path?: string }) | undefined;
-                const rawPath = file?.path ?? "";
-                const trimmed = rawPath.replace(/[\\/][^\\/]+$/, "");
-                if (trimmed) {
-                  updateModelNode({ workspace_root: trimmed });
-                }
-                e.currentTarget.value = "";
-              }}
-            />
-          </label>
-          <label className="asField">
             <div className="asFieldLabel">Instructions</div>
             <textarea
               className="asTextarea"
@@ -1229,7 +1317,16 @@ function NodeInspector(props: {
             </select>
           </label>
           <label className="asField">
-            <div className="asFieldLabel">Model</div>
+            <div className="asFieldLabel">
+              Model
+              {isFetchingModels ? (
+                <span className="asFieldHint"> (loading...)</span>
+              ) : modelsFetchError ? (
+                <span className="asFieldHint asFieldHintWarn" title={modelsFetchError}> (using defaults)</span>
+              ) : fetchedModels.length > 0 ? (
+                <span className="asFieldHint"> ({fetchedModels.length} available)</span>
+              ) : null}
+            </div>
             <select
               className="asSelect"
               value={modelName || modelOptions[0] || ""}
@@ -1246,14 +1343,27 @@ function NodeInspector(props: {
             </select>
           </label>
           <label className="asField">
-            <div className="asFieldLabel">Temperature</div>
-            <input
-              className="asInput"
-              type="number"
-              step="0.1"
-              value={node.temperature ?? 0}
-              onChange={(e) => updateModelNode({ temperature: Number(e.currentTarget.value) })}
-            />
+            <div className="asFieldLabel">Workspace root (optional)</div>
+            <div className="asRow">
+              <input
+                className="asInput"
+                placeholder="Select a folder or enter a path"
+                value={node.workspace_root ?? ""}
+                onChange={(e) => updateModelNode({ workspace_root: e.currentTarget.value })}
+              />
+              <button
+                className="asBtn"
+                type="button"
+                onClick={async () => {
+                  const folder = await (window as any).agentStudio.selectFolder();
+                  if (folder) {
+                    updateModelNode({ workspace_root: folder });
+                  }
+                }}
+              >
+                Select folder
+              </button>
+            </div>
           </label>
           <label className="asField">
             <div className="asFieldLabel">Input guardrails (JSON)</div>

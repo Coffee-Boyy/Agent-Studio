@@ -89,6 +89,13 @@ def get_agent_revision(revision_id: str) -> AgentRevisionResponse:
         return AgentRevisionResponse.model_validate(rev)
 
 
+@app.delete("/v1/workflows/{workflow_name}")
+def delete_workflow(workflow_name: str) -> dict[str, Any]:
+    with Session(ENGINE) as session:
+        deleted = REVISIONS.delete_by_name(session, name=workflow_name)
+        return {"deleted": deleted}
+
+
 @app.post("/v1/runs", response_model=RunResponse)
 async def create_run(req: RunCreateRequest) -> RunResponse:
     with Session(ENGINE) as session:
@@ -133,11 +140,17 @@ def get_run(run_id: str) -> RunResponse:
 
 
 @app.get("/v1/runs", response_model=list[RunResponse])
-def list_runs(revision_id: Optional[str] = None, limit: int = 100, offset: int = 0) -> list[RunResponse]:
+def list_runs(
+    revision_id: Optional[str] = None,
+    workflow_name: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> list[RunResponse]:
     with Session(ENGINE) as session:
         runs = RUNS.list_runs(
             session,
             revision_id=revision_id,
+            workflow_name=workflow_name,
             limit=min(limit, 500),
             offset=max(offset, 0),
         )

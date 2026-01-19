@@ -99,6 +99,18 @@ body,
   flex-direction: column;
   gap: 8px;
 }
+.asSidebarSection {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+.asSidebarSectionTitle {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.65;
+}
 .asPill {
   display: flex;
   gap: 8px;
@@ -341,6 +353,10 @@ body,
   opacity: 0.7;
   font-weight: 450;
 }
+.asFieldHintWarn {
+  color: #f59e0b;
+  cursor: help;
+}
 
 .asInput,
 .asTextarea,
@@ -397,6 +413,64 @@ body,
   line-height: 1.35;
   resize: vertical;
 }
+.asMarkdown {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.75);
+  color: inherit;
+  min-height: 148px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.45;
+}
+@media (prefers-color-scheme: dark) {
+  .asMarkdown {
+    background: rgba(2, 6, 23, 0.35);
+    border-color: rgba(148, 163, 184, 0.2);
+  }
+}
+.asMarkdown > :first-child {
+  margin-top: 0;
+}
+.asMarkdown > :last-child {
+  margin-bottom: 0;
+}
+.asMarkdown h1,
+.asMarkdown h2,
+.asMarkdown h3 {
+  margin: 10px 0 6px;
+  font-weight: 700;
+}
+.asMarkdown p,
+.asMarkdown ul,
+.asMarkdown ol {
+  margin: 6px 0;
+}
+.asMarkdown ul,
+.asMarkdown ol {
+  padding-left: 20px;
+}
+.asMarkdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  background: rgba(148, 163, 184, 0.18);
+}
+.asMarkdown pre {
+  margin: 8px 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.2);
+  overflow: auto;
+}
+.asMarkdown pre code {
+  padding: 0;
+  background: transparent;
+}
 .asInput:focus,
 .asTextarea:focus,
 .asSelect:focus {
@@ -423,10 +497,23 @@ body,
 .asBtn:hover {
   border-color: rgba(100, 108, 255, 0.65);
 }
+.asBtn:disabled,
+.asBtn:disabled:hover {
+  cursor: not-allowed;
+  opacity: 0.6;
+  border-color: rgba(148, 163, 184, 0.28);
+  background: rgba(255, 255, 255, 0.6);
+  transform: none;
+}
 @media (prefers-color-scheme: dark) {
   .asBtn:hover {
     background: rgba(2, 6, 23, 0.6);
     border-color: rgba(100, 108, 255, 0.65);
+  }
+  .asBtn:disabled,
+  .asBtn:disabled:hover {
+    background: rgba(2, 6, 23, 0.4);
+    border-color: rgba(148, 163, 184, 0.2);
   }
 }
 .asBtn:active {
@@ -436,6 +523,12 @@ body,
   background: linear-gradient(180deg, rgba(100, 108, 255, 0.95), rgba(79, 70, 229, 0.95));
   border-color: rgba(100, 108, 255, 0.65);
   color: white;
+}
+.asBtn.primary:disabled,
+.asBtn.primary:disabled:hover {
+  background: rgba(100, 108, 255, 0.35);
+  border-color: rgba(100, 108, 255, 0.35);
+  color: rgba(255, 255, 255, 0.7);
 }
 .asBtn.sm {
   padding: 7px 10px;
@@ -605,6 +698,85 @@ body,
   border-top: 1px solid rgba(148, 163, 184, 0.16);
   font-size: 12px;
   overflow: auto;
+}
+.asEventImageWrap {
+  padding: 10px 10px;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(2, 6, 23, 0.03);
+}
+@media (prefers-color-scheme: dark) {
+  .asEventImageWrap {
+    background: rgba(2, 6, 23, 0.35);
+  }
+}
+.asEventImage {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+}
+
+.asWorkflowList {
+  display: grid;
+  gap: 6px;
+  max-height: 280px;
+  overflow: auto;
+}
+.asWorkflowItem {
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  background: rgba(255, 255, 255, 0.55);
+  color: inherit;
+  padding: 8px 10px;
+  border-radius: 10px;
+  text-align: left;
+  cursor: pointer;
+  display: grid;
+  gap: 4px;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.asWorkflowItem:hover {
+  border-color: rgba(100, 108, 255, 0.6);
+}
+.asWorkflowItem.active {
+  background: rgba(100, 108, 255, 0.12);
+  border-color: rgba(100, 108, 255, 0.6);
+}
+.asWorkflowName {
+  font-weight: 600;
+}
+.asWorkflowMeta {
+  font-size: 12px;
+  opacity: 0.7;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  .asWorkflowItem {
+    background: rgba(2, 6, 23, 0.35);
+    border-color: rgba(148, 163, 184, 0.18);
+  }
+}
+.asWorkflowDelete {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.7;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.asWorkflowDelete:hover {
+  opacity: 1;
+}
+.asWorkflowDelete svg {
+  width: 14px;
+  height: 14px;
 }
 
 .asDiff {
@@ -1063,5 +1235,60 @@ body,
   .asTableRow.active {
     border-color: rgba(96, 165, 250, 0.7);
     box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.3);
+  }
+}
+
+/* Loading screen */
+.asLoadingScreen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  grid-column: 1 / -1;
+}
+
+.asLoadingContent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  text-align: center;
+}
+
+.asLoadingSpinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(148, 163, 184, 0.3);
+  border-top-color: #646cff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.asLoadingText {
+  font-size: 16px;
+  color: #64748b;
+}
+
+.asLoadingError {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: #ef4444;
+  max-width: 400px;
+  word-break: break-word;
+}
+
+@media (prefers-color-scheme: dark) {
+  .asLoadingText {
+    color: #94a3b8;
+  }
+  .asLoadingSpinner {
+    border-color: rgba(148, 163, 184, 0.2);
+    border-top-color: #818cf8;
   }
 }

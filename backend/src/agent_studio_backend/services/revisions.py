@@ -31,6 +31,14 @@ class AgentRevisionService:
         stmt = select(AgentRevision).order_by(AgentRevision.created_at.desc()).offset(offset).limit(limit)
         return list(session.exec(stmt).all())
 
+    def delete_by_name(self, session: Session, *, name: str) -> int:
+        stmt = select(AgentRevision).where(AgentRevision.name == name)
+        revisions = list(session.exec(stmt).all())
+        for rev in revisions:
+            session.delete(rev)
+        session.commit()
+        return len(revisions)
+
 
 REVISIONS = AgentRevisionService()
 
