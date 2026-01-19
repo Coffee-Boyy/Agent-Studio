@@ -167,7 +167,6 @@ export type AgentNode = NodeBase & {
   input_guardrails?: GuardrailSpec[];
   output_guardrails?: GuardrailSpec[];
   output_type?: Record<string, unknown> | null;
-  workspace_root?: string;
   sandbox_tools?: boolean;
 };
 
@@ -196,6 +195,7 @@ export type AgentGraphDocV1 = {
   edges: GraphEdge[];
   viewport: GraphViewport;
   metadata: Record<string, unknown>;
+  workspace_root?: string;
 };
 
 export type AgentSpecEnvelope = {

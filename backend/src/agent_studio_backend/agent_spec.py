@@ -45,6 +45,7 @@ class AgentGraphDocV1(BaseModel):
     edges: list[GraphEdge] = Field(default_factory=list)
     viewport: GraphViewport = Field(default_factory=GraphViewport)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    workspace_root: Optional[str] = None
 
 
 class AgentSpecEnvelope(BaseModel):

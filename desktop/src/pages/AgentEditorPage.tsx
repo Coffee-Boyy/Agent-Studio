@@ -39,55 +39,10 @@ import type {
   WorkflowRevisionResponse,
   WorkflowWithLatestRevisionResponse,
 } from "../lib/types";
+import { buildEnvelope, DEFAULT_GRAPH } from "../lib/constants";
 import { TraceViewer } from "../components/TraceViewer";
 import { useUndoRedoState } from "../components/UndoRedo";
 import { NodeInspector } from "../components/NodeInspector";
-
-const DEFAULT_GRAPH: AgentGraphDocV1 = {
-  schema_version: "graph-v1",
-  nodes: [
-    {
-      id: "input-1",
-      type: "input",
-      name: "Input",
-      position: { x: 40, y: 80 },
-      schema: { input: "string" },
-    },
-    {
-      id: "agent-1",
-      type: "agent",
-      name: "Main Agent",
-      position: { x: 320, y: 80 },
-      instructions: "You are a helpful agent.",
-      model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
-      tools: [],
-      input_guardrails: [],
-      output_guardrails: [],
-      output_type: null,
-    },
-    {
-      id: "output-1",
-      type: "output",
-      name: "Output",
-      position: { x: 620, y: 80 },
-    },
-  ],
-  edges: [
-    { id: "edge-1", source: "input-1", target: "agent-1" },
-    { id: "edge-2", source: "agent-1", target: "output-1" },
-  ],
-  viewport: { x: 0, y: 0, zoom: 1 },
-  metadata: {},
-};
-
-function buildEnvelope(graph: AgentGraphDocV1): AgentSpecEnvelope {
-  return {
-    schema_version: "graph-v1",
-    graph,
-    compiled: null,
-    metadata: {},
-  };
-}
 
 function formatInputPreview(inputs: Record<string, unknown>): string {
   const rawInput = inputs?.input;
@@ -273,7 +228,6 @@ function migrateLegacyGraph(graph: AgentGraphDocV1): AgentGraphDocV1 {
         input_guardrails: [],
         output_guardrails: [],
         output_type: null,
-        workspace_root: typeof node.workspace_root === "string" ? node.workspace_root : undefined,
       });
       continue;
     }
@@ -1054,43 +1008,6 @@ export function AgentEditorPage(props: {
     setTimeout(() => flowRef.current?.fitView({ padding: 0.2, duration: 200 }), 50);
   }
 
-  async function createNewWorkflow() {
-    setGraph(DEFAULT_GRAPH);
-    setHasUnsavedChanges(true);
-    graphState.clearHistory();
-    setSelectedNodeId(null);
-    setSelectedEdgeId(null);
-    setSelectedWorkflowId("");
-    setSelectedRevisionId("");
-    loadedWorkflowIdRef.current = "";
-    props.onSelectWorkflow?.("");
-    setIssues(null);
-    setErr(null);
-    setName("New Workflow");
-    // Reset the graph editor viewport
-    setTimeout(() => flowRef.current?.fitView({ padding: 0.2, duration: 200 }), 50);
-
-    setBusy(true);
-    try {
-      const res = await api(props.backend).createWorkflow({
-        name: "New Workflow",
-        spec_json: buildEnvelope(DEFAULT_GRAPH),
-      });
-      await refreshWorkflows();
-      // Set the loaded ref so we don't re-trigger the load effect
-      loadedWorkflowIdRef.current = res.id;
-      selectWorkflow(res.id);
-      if (res.latest_revision) {
-        setSelectedRevisionId(res.latest_revision.id);
-      }
-      setHasUnsavedChanges(false);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   const [workflowRevisions, setWorkflowRevisions] = useState<WorkflowRevisionResponse[]>([]);
 
   useEffect(() => {
@@ -1164,10 +1081,34 @@ export function AgentEditorPage(props: {
                 }}
               />
             </label>
+            <label className="asField">
+              <div className="asFieldLabel">Workspace root (optional)</div>
+              <div className="asInputGroup">
+                <input
+                  className="asInput"
+                  placeholder="Select a folder or enter a path"
+                  value={graph.workspace_root ?? ""}
+                  onChange={(e) => {
+                    setGraph({ ...graph, workspace_root: e.currentTarget.value });
+                    setHasUnsavedChanges(true);
+                  }}
+                />
+                <button
+                  className="asInputGroupBtn"
+                  type="button"
+                  onClick={async () => {
+                    const folder = await (window as any).agentStudio.selectFolder();
+                    if (folder) {
+                      setGraph({ ...graph, workspace_root: folder });
+                      setHasUnsavedChanges(true);
+                    }
+                  }}
+                >
+                  Select folder
+                </button>
+              </div>
+            </label>
             <div className="asRow">
-              <button className="asBtn" onClick={createNewWorkflow} disabled={busy}>
-                New workflow
-              </button>
               <button className="asBtn primary" onClick={saveRevision} disabled={busy || !hasUnsavedChanges}>
                 Save
               </button>

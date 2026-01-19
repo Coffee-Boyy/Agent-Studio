@@ -25,7 +25,6 @@ class AgentNode(NodeBase):
     input_guardrails: list[GuardrailSpec] = Field(default_factory=list)
     output_guardrails: list[GuardrailSpec] = Field(default_factory=list)
     output_type: Optional[dict[str, Any]] = None
-    workspace_root: Optional[str] = None
     sandbox_tools: bool = True
 
 
@@ -76,7 +75,7 @@ class AgentNodeHandler:
         tool_nodes = get_tool_nodes(ctx.graph)
         tool_ids = collect_tool_ids(ctx.graph, node, tool_nodes)
         tools = build_tool_instances(tool_ids, tool_nodes)
-        tools.extend(_workspace_tools(node, ctx))
+        tools.extend(_workspace_tools(ctx.graph.workspace_root, node.sandbox_tools, ctx))
 
         handoff_agents = _build_handoff_agents(ctx, node)
         input_guardrails = _build_guardrail_callables(node.input_guardrails)
@@ -98,12 +97,12 @@ class AgentNodeHandler:
         )
 
 
-def _workspace_tools(node: AgentNode, ctx: RunContext) -> list[Any]:
-    if not node.workspace_root:
+def _workspace_tools(workspace_root: Optional[str], sandbox_tools: bool, ctx: RunContext) -> list[Any]:
+    if not workspace_root:
         return []
-    workspace_root = Path(node.workspace_root).expanduser()
-    tools = build_workspace_tools(workspace_root)
-    if not node.sandbox_tools:
+    workspace_root_path = Path(workspace_root).expanduser()
+    tools = build_workspace_tools(workspace_root_path)
+    if not sandbox_tools:
         return tools
 
     services = ctx.services
@@ -114,13 +113,13 @@ def _workspace_tools(node: AgentNode, ctx: RunContext) -> list[Any]:
 
     screenshot_service = services.get("screenshot_service")
     if screenshot_service is None:
-        screenshot_service = ScreenshotService(workspace_root=workspace_root)
+        screenshot_service = ScreenshotService(workspace_root=workspace_root_path)
         services["screenshot_service"] = screenshot_service
 
     tools.extend(
         build_shell_tools(
             run_id=ctx.run_id,
-            workspace_root=workspace_root,
+            workspace_root=workspace_root_path,
             process_manager=process_manager,
         )
     )
@@ -152,7 +151,7 @@ def _build_handoff_agents(ctx: RunContext, node: AgentNode) -> list[Any]:
             continue
         tool_ids = collect_tool_ids(ctx.graph, target, tool_nodes)
         tools = build_tool_instances(tool_ids, tool_nodes)
-        tools.extend(_workspace_tools(target, ctx))
+        tools.extend(_workspace_tools(ctx.graph.workspace_root, target.sandbox_tools, ctx))
         input_guardrails = _build_guardrail_callables(target.input_guardrails)
         output_guardrails = _build_guardrail_callables(target.output_guardrails)
         agent_cfg = _build_agent_cfg(target)

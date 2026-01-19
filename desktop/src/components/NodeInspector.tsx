@@ -38,7 +38,6 @@ const NODE_HELP: Record<AgentGraphNode["type"], NodeHelpContent> = {
     fields: [
       "Instructions: system prompt for the agent.",
       "Provider/Model: LLM configuration for this agent.",
-      "Workspace root: optional sandbox root for file operations.",
       "Guardrails: optional input/output validation policies.",
       "Output schema: optional JSON schema describing structured output.",
     ],
@@ -339,29 +338,6 @@ export function NodeInspector(props: {
                 </option>
               ))}
             </select>
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Workspace root (optional)</div>
-            <div className="asRow">
-              <input
-                className="asInput"
-                placeholder="Select a folder or enter a path"
-                value={node.workspace_root ?? ""}
-                onChange={(e) => updateModelNode({ workspace_root: e.currentTarget.value })}
-              />
-              <button
-                className="asBtn"
-                type="button"
-                onClick={async () => {
-                  const folder = await (window as any).agentStudio.selectFolder();
-                  if (folder) {
-                    updateModelNode({ workspace_root: folder });
-                  }
-                }}
-              >
-                Select folder
-              </button>
-            </div>
           </label>
           <label className="asField">
             <div className="asFieldLabel">Input guardrails (JSON)</div>

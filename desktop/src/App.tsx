@@ -8,6 +8,7 @@ import type {
 import { api, type BackendConfig } from "./lib/api";
 import { loadSettings, saveSettings } from "./lib/storage";
 import { formatRelativeTime, uniq } from "./lib/utils";
+import { buildEnvelope, DEFAULT_GRAPH } from "./lib/constants";
 import { AgentEditorPage } from "./pages/AgentEditorPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { NavItem } from "./components/NavItem";
@@ -105,7 +106,30 @@ function App() {
 
         {route === "editor" ? (
           <div className="asSidebarSection">
-            <div className="asSidebarSectionTitle">Workflows</div>
+            <div className="asSidebarSectionTitle">
+              Workflows
+              <button
+                className="asSidebarSectionButton"
+                type="button"
+                aria-label="Create new workflow"
+                onClick={async () => {
+                  try {
+                    const res = await api(backend).createWorkflow({
+                      name: "New Workflow",
+                      spec_json: buildEnvelope(DEFAULT_GRAPH),
+                    });
+                    await refreshEditorWorkflows();
+                    setEditorSelectedWorkflowId(res.id);
+                  } catch (e) {
+                    console.error("Failed to create workflow:", e);
+                  }
+                }}
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+                  <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
             {editorWorkflows.length > 0 ? (
               <div className="asWorkflowList">
                 {editorWorkflows.map((workflow) => (

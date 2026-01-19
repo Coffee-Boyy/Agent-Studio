@@ -110,6 +110,31 @@ body,
   text-transform: uppercase;
   letter-spacing: 0.06em;
   opacity: 0.65;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.asSidebarSectionButton {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  opacity: 0.7;
+  transition: opacity 140ms ease, background 140ms ease;
+}
+.asSidebarSectionButton:hover {
+  opacity: 1;
+  background: rgba(100, 108, 255, 0.15);
+}
+.asSidebarSectionButton svg {
+  display: block;
 }
 .asPill {
   display: flex;
@@ -476,6 +501,44 @@ body,
 .asSelect:focus {
   border-color: rgba(100, 108, 255, 0.7);
   box-shadow: 0 0 0 3px rgba(100, 108, 255, 0.15);
+}
+
+.asInputGroup {
+  position: relative;
+  width: 100%;
+}
+.asInputGroup .asInput {
+  padding-right: 120px;
+}
+.asInputGroupBtn {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(255, 255, 255, 0.9);
+  color: inherit;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-weight: 650;
+  font-size: 13px;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+@media (prefers-color-scheme: dark) {
+  .asInputGroupBtn {
+    background: rgba(2, 6, 23, 0.6);
+    border-color: rgba(148, 163, 184, 0.25);
+  }
+}
+.asInputGroupBtn:hover {
+  border-color: rgba(100, 108, 255, 0.65);
+  background: rgba(100, 108, 255, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+  .asInputGroupBtn:hover {
+    background: rgba(100, 108, 255, 0.15);
+  }
 }
 
 .asBtn {
