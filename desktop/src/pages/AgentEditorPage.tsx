@@ -82,6 +82,72 @@ const DEFAULT_GRAPH: AgentGraphDocV1 = {
   metadata: {},
 };
 
+type NodeHelpContent = {
+  title: string;
+  summary: string;
+  connections: string[];
+  fields: string[];
+  tips: string[];
+};
+
+const NODE_HELP: Record<AgentGraphNode["type"], NodeHelpContent> = {
+  input: {
+    title: "Input node",
+    summary:
+      "Defines the entry point for data flowing into the workflow. Use this node to describe the shape of incoming inputs and to make validation explicit.",
+    connections: [
+      "Source-only node: connects to agents or tools that consume input.",
+      "Typically the first node in a workflow.",
+    ],
+    fields: ["Name: friendly label used in the graph.", "Schema: JSON schema describing the expected input payload."],
+    tips: [
+      "Keep the schema minimal but accurate to help validation.",
+      "Use examples in your test runs to match this schema.",
+    ],
+  },
+  agent: {
+    title: "Agent node",
+    summary:
+      "Runs an LLM-powered agent that interprets instructions, uses tools, and produces outputs. This is the core reasoning unit in a workflow.",
+    connections: [
+      "Accepts inputs from upstream nodes (input, tool, or other agents).",
+      "Can connect to tools and outputs.",
+    ],
+    fields: [
+      "Instructions: system prompt for the agent.",
+      "Provider/Model: LLM configuration for this agent.",
+      "Workspace root: optional sandbox root for file operations.",
+      "Guardrails: optional input/output validation policies.",
+      "Output schema: optional JSON schema describing structured output.",
+    ],
+    tips: ["Keep instructions focused on role + task.", "Add output schema when downstream steps need structured data."],
+  },
+  tool: {
+    title: "Tool node",
+    summary:
+      "Defines a callable tool that the agent can execute. Tools are small, deterministic functions that return structured data.",
+    connections: [
+      "Source-only node: connects to agent nodes only.",
+      "Agents call tools during reasoning; tools return data to the agent.",
+    ],
+    fields: [
+      "Name/Tool name: how the agent calls the tool.",
+      "Description: guidance for when to use the tool.",
+      "Code: implementation of the tool.",
+      "Schema: JSON schema for tool arguments.",
+    ],
+    tips: ["Keep tools side-effect focused and narrow in scope.", "Match the schema to the expected arguments."],
+  },
+  output: {
+    title: "Output node",
+    summary:
+      "Marks the final output of the workflow. Use this node to capture the last response from the graph.",
+    connections: ["Target-only node: receives output from the final agent.", "Typically the last node in the workflow."],
+    fields: ["Name: friendly label for the output."],
+    tips: ["Use a single output node to simplify downstream consumers.", "Pair with output schema on the agent for structure."],
+  },
+};
+
 function buildEnvelope(graph: AgentGraphDocV1): AgentSpecEnvelope {
   return {
     schema_version: "graph-v1",
@@ -375,6 +441,7 @@ export function AgentEditorPage(props: {
   const [busy, setBusy] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
+  const [nodeHelpOpen, setNodeHelpOpen] = useState(false);
   const [jsonModal, setJsonModal] = useState<null | { text: string }>(null);
   const [testInputText, setTestInputText] = useState('{"input": "Create a simple HTML page"}');
   const [testOutput, setTestOutput] = useState("");
@@ -528,6 +595,12 @@ export function AgentEditorPage(props: {
     () => graph.edges.find((e) => e.id === selectedEdgeId) ?? null,
     [graph.edges, selectedEdgeId],
   );
+
+  useEffect(() => {
+    if (!selectedNodeId) {
+      setNodeHelpOpen(false);
+    }
+  }, [selectedNodeId]);
 
   const nodeTypes: NodeTypes = useMemo(() => ({ agentNode: AgentFlowNode }), []);
 
@@ -832,7 +905,28 @@ export function AgentEditorPage(props: {
 
         <div className="asCard">
           <div className="asCardHeader">
-            <div className="asCardTitle">Node inspector</div>
+            {selectedNode ? (
+              <div className="asNodeInspectorHeader">
+                <div className="asNodeInspectorTitle">
+                  <span>Node details</span>
+                </div>
+                <div className="asNodeInspectorActions">
+                  <span className={`asNodeTypePill type-${selectedNode.type}`}>{selectedNode.type}</span>
+                  <button
+                    className="asHelpIcon"
+                    type="button"
+                    aria-label={`${nodeHelpOpen ? "Hide" : "Show"} ${selectedNode.type} node help`}
+                    onClick={() => setNodeHelpOpen((prev) => !prev)}
+                  >
+                    ?
+                  </button>
+                </div>
+              </div>
+            ) : selectedEdge ? (
+              <div className="asCardTitle">Edge inspector</div>
+            ) : (
+              <div className="asCardTitle">Inspector</div>
+            )}
           </div>
           <div className="asCardBody">
             {selectedNode ? (
@@ -842,6 +936,7 @@ export function AgentEditorPage(props: {
                 onChange={updateNode}
                 onDelete={deleteNode}
                 settings={props.settings}
+                helpOpen={nodeHelpOpen}
               />
             ) : selectedEdge ? (
               <div className="asStack">
@@ -1156,8 +1251,9 @@ function NodeInspector(props: {
   onChange: (node: AgentGraphNode) => void;
   onDelete: (nodeId: string) => void;
   settings: AppSettings;
+  helpOpen: boolean;
 }) {
-  const { node, issues, onChange, onDelete, settings } = props;
+  const { node, issues, onChange, onDelete, settings, helpOpen } = props;
   const [schemaText, setSchemaText] = useState(() =>
     node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
   );
@@ -1269,6 +1365,38 @@ function NodeInspector(props: {
               <span className="asMono">{issue.code}</span> {issue.message}
             </div>
           ))}
+        </div>
+      ) : null}
+      {helpOpen ? (
+        <div className="asHelpPanel">
+          <div className="asHelpPanelTitle">{NODE_HELP[node.type].title}</div>
+          <div className="asHelpPanelBody">
+            <div className="asHelpPanelSummary">{NODE_HELP[node.type].summary}</div>
+            <div className="asHelpPanelSection">
+              <div className="asHelpPanelLabel">Connections</div>
+              <ul>
+                {NODE_HELP[node.type].connections.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="asHelpPanelSection">
+              <div className="asHelpPanelLabel">Fields</div>
+              <ul>
+                {NODE_HELP[node.type].fields.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+            <div className="asHelpPanelSection">
+              <div className="asHelpPanelLabel">Tips</div>
+              <ul>
+                {NODE_HELP[node.type].tips.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
         </div>
       ) : null}
       <label className="asField">
