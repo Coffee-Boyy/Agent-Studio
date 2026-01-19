@@ -2,10 +2,10 @@ import "./App.css";
 
 import { useEffect, useMemo, useState } from "react";
 import type {
+  AgentNode,
   AgentRevisionResponse,
   AgentSpecEnvelope,
   HealthResponse,
-  LLMNode,
   LlmConnection,
   RunCreateRequest,
   RunResponse,
@@ -223,9 +223,9 @@ function AgentRunnerPage(props: { backend: BackendConfig; settings: AppSettings;
   function resolveProvider(revision: AgentRevisionResponse): LlmProvider | null {
     const spec = revision.spec_json as AgentSpecEnvelope;
     if (!spec || spec.schema_version !== "graph-v1" || !spec.graph) return null;
-    const llmNode = spec.graph.nodes.find((node) => node.type === "llm") as LLMNode | undefined;
-    if (!llmNode) return null;
-    const model = llmNode.model ?? {};
+    const agentNode = spec.graph.nodes.find((node) => node.type === "agent") as AgentNode | undefined;
+    if (!agentNode) return null;
+    const model = agentNode.model ?? {};
     if (typeof model !== "object" || Array.isArray(model) || !model) return null;
     const provider = (model as { provider?: unknown }).provider;
     return isLlmProvider(provider) ? provider : null;

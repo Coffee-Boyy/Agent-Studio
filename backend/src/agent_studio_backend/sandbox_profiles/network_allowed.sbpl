@@ -1,0 +1,6 @@
+(version 1)
+(allow default)
+(deny file-write*)
+(allow file-write* (subpath "{workspace}"))
+(allow file-write* (subpath "/tmp"))
+(allow file-write* (subpath "/private/tmp"))

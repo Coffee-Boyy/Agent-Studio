@@ -33,12 +33,11 @@ import {
 import { loadAgentDraft, saveAgentDraft, type AppSettings, type TestRunEntry } from "../lib/storage";
 import type {
   AgentGraphDocV1,
+  AgentGraphNode,
   AgentNode,
   AgentRevisionCreateRequest,
   AgentRevisionResponse,
   AgentSpecEnvelope,
-  CodeEditorNode,
-  LLMNode,
   ToolNode,
   ValidationIssue,
 } from "../lib/types";
@@ -55,14 +54,17 @@ const DEFAULT_GRAPH: AgentGraphDocV1 = {
       schema: { input: "string" },
     },
     {
-      id: "llm-1",
-      type: "llm",
-      name: "Main LLM",
+      id: "agent-1",
+      type: "agent",
+      name: "Main Agent",
       position: { x: 320, y: 80 },
-      system_prompt: "You are a helpful agent.",
+      instructions: "You are a helpful agent.",
       model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
       tools: [],
       temperature: 0.3,
+      input_guardrails: [],
+      output_guardrails: [],
+      output_type: null,
     },
     {
       id: "output-1",
@@ -72,8 +74,8 @@ const DEFAULT_GRAPH: AgentGraphDocV1 = {
     },
   ],
   edges: [
-    { id: "edge-1", source: "input-1", target: "llm-1" },
-    { id: "edge-2", source: "llm-1", target: "output-1" },
+    { id: "edge-1", source: "input-1", target: "agent-1" },
+    { id: "edge-2", source: "agent-1", target: "output-1" },
   ],
   viewport: { x: 0, y: 0, zoom: 1 },
   metadata: {},
@@ -128,6 +130,14 @@ function formatInputPreview(inputs: Record<string, unknown>): string {
   return singleLine.length > 120 ? `${singleLine.slice(0, 117)}...` : singleLine;
 }
 
+function tryParseJsonValue(text: string): { ok: boolean; value: unknown } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false, value: null };
+  }
+}
+
 function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, ValidationIssue[]>): Node[] {
   return graph.nodes.map((n) => ({
     id: n.id,
@@ -175,31 +185,22 @@ function mergeFlow(graph: AgentGraphDocV1, flowNodes: Node[], flowEdges: Edge[])
   return { ...graph, nodes, edges: edgesFiltered };
 }
 
-function newNode(type: AgentNode["type"], idx: number): AgentNode {
+function newNode(type: AgentGraphNode["type"], idx: number): AgentGraphNode {
   const id = `${type}-${crypto.randomUUID()}`;
   const position = { x: 40 + idx * 30, y: 220 + idx * 30 };
-  if (type === "llm") {
+  if (type === "agent") {
     return {
       id,
       type,
-      name: "LLM",
+      name: "Agent",
       position,
-      system_prompt: "",
+      instructions: "",
       model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
       tools: [],
       temperature: 0.2,
-    };
-  }
-  if (type === "code_editor") {
-    return {
-      id,
-      type,
-      name: "Code editor",
-      position,
-      system_prompt: "You are a helpful code editor.",
-      model: { provider: DEFAULT_LLM_PROVIDER, name: MODEL_OPTIONS[DEFAULT_LLM_PROVIDER][0] },
-      tools: [],
-      temperature: 0.2,
+      input_guardrails: [],
+      output_guardrails: [],
+      output_type: null,
     };
   }
   if (type === "tool") {
@@ -215,22 +216,45 @@ function newNode(type: AgentNode["type"], idx: number): AgentNode {
       code: 'def run(ctx, **kwargs):\n    return {"received": kwargs}\n',
     };
   }
-  if (type === "guardrail") {
-    return { id, type, name: "Guardrail", position, rule: "" };
-  }
-  if (type === "router") {
-    return { id, type, name: "Router", position, strategy: "first" };
-  }
-  if (type === "handoff") {
-    return { id, type, name: "Handoff", position, target_agent_id: "" };
-  }
-  if (type === "subagent") {
-    return { id, type, name: "Subagent", position, agent_name: "Subagent", agent_revision_id: "", system_prompt: "" };
-  }
   if (type === "output") {
     return { id, type, name: "Output", position };
   }
   return { id, type: "input", name: "Input", position, schema: {} };
+}
+
+function migrateLegacyGraph(graph: AgentGraphDocV1): AgentGraphDocV1 {
+  const migratedNodes: AgentGraphNode[] = [];
+  for (const node of graph.nodes as Array<Record<string, unknown>>) {
+    const type = node.type;
+    if (type === "agent") {
+      migratedNodes.push(node as AgentGraphNode);
+      continue;
+    }
+    if (type === "llm" || type === "code_editor") {
+      migratedNodes.push({
+        id: String(node.id ?? crypto.randomUUID()),
+        type: "agent",
+        name: typeof node.name === "string" ? node.name : type === "code_editor" ? "Code editor" : "Agent",
+        position: (node.position as AgentGraphNode["position"]) ?? { x: 0, y: 0 },
+        instructions: typeof node.system_prompt === "string" ? node.system_prompt : "",
+        model: (node.model as Record<string, unknown>) ?? {},
+        tools: Array.isArray(node.tools) ? (node.tools as string[]) : [],
+        temperature: typeof node.temperature === "number" ? node.temperature : null,
+        input_guardrails: [],
+        output_guardrails: [],
+        output_type: null,
+        workspace_root: typeof node.workspace_root === "string" ? node.workspace_root : undefined,
+      });
+      continue;
+    }
+    if (type === "tool" || type === "input" || type === "output") {
+      migratedNodes.push(node as AgentGraphNode);
+      continue;
+    }
+  }
+  const nodeIds = new Set(migratedNodes.map((n) => n.id));
+  const edges = graph.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target));
+  return { ...graph, nodes: migratedNodes, edges };
 }
 
 type UndoRedoState<T> = {
@@ -330,7 +354,7 @@ export function AgentEditorPage(props: {
   const graphState = useUndoRedoState<AgentGraphDocV1>(() => {
     const draft = loadAgentDraft();
     if (draft && draft.schema_version === "graph-v1") {
-      return draft as AgentGraphDocV1;
+      return migrateLegacyGraph(draft as AgentGraphDocV1);
     }
     return DEFAULT_GRAPH;
   });
@@ -439,14 +463,9 @@ export function AgentEditorPage(props: {
     }
     async function loadRuns() {
       try {
-        const runs = await api(props.backend).listRuns(selectedRevId, 50, 0);
+        const runs = await api(props.backend).listRuns(5, 0);
         if (cancelled) return;
-        const entries = runs.map((run) => ({
-          id: run.id,
-          created_at: run.started_at,
-          inputs_json: run.inputs_json ?? {},
-        }));
-        setTestRunHistory(entries);
+        setTestRunHistory(runs);
       } catch {
         if (cancelled) return;
         setTestRunHistory([]);
@@ -486,7 +505,10 @@ export function AgentEditorPage(props: {
     setFlowEdges((prev) => {
       const sourceType = flowNodesRef.current.find((n) => n.id === params.source)?.data?.nodeType;
       const targetType = flowNodesRef.current.find((n) => n.id === params.target)?.data?.nodeType;
-      const isAgentTarget = targetType === "llm" || targetType === "code_editor";
+      const isAgentTarget = targetType === "agent";
+      if (sourceType === "output" || targetType === "input") {
+        return prev;
+      }
       if (sourceType === "tool" && !isAgentTarget) {
         return prev;
       }
@@ -585,10 +607,11 @@ export function AgentEditorPage(props: {
       props.onStartRun(res.id);
       const entry = {
         id: res.id,
-        created_at: new Date().toISOString(),
+        started_at: new Date().toISOString(),
         inputs_json: parsed.value,
+        final_output: res.final_output ?? null,
       };
-      setTestRunHistory((prev) => [entry, ...prev.filter((it) => it.id !== entry.id)].slice(0, 20));
+      setTestRunHistory((prev) => [entry, ...prev.filter((it) => it.id !== entry.id)].slice(0, 5));
       let latest = res;
       while (latest && !latest.ended_at && !["completed", "failed", "cancelled"].includes(latest.status)) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -649,11 +672,11 @@ export function AgentEditorPage(props: {
     }
   }
 
-  function addNode(type: AgentNode["type"]) {
+  function addNode(type: AgentGraphNode["type"]) {
     setGraph((g) => ({ ...g, nodes: [...g.nodes, newNode(type, g.nodes.length)] }));
   }
 
-  function updateNode(next: AgentNode) {
+  function updateNode(next: AgentGraphNode) {
     setGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === next.id ? next : n)) }));
   }
 
@@ -694,7 +717,7 @@ export function AgentEditorPage(props: {
       setErr("Selected revision is not a graph-v1 spec.");
       return;
     }
-    setGraph(spec.graph);
+    setGraph(migrateLegacyGraph(spec.graph));
     graphState.clearHistory();
     setErr(null);
     setIssues(null);
@@ -724,7 +747,7 @@ export function AgentEditorPage(props: {
 
         <div className="asCard">
           <div className="asCardHeader">
-            <div className="asCardTitle">Inspector</div>
+            <div className="asCardTitle">Node inspector</div>
           </div>
           <div className="asCardBody">
             {selectedNode ? (
@@ -733,8 +756,6 @@ export function AgentEditorPage(props: {
                 issues={issuesByNodeId.get(selectedNode.id) ?? []}
                 onChange={updateNode}
                 onDelete={deleteNode}
-                revisions={revs}
-                currentAgentName={name}
                 settings={props.settings}
               />
             ) : selectedEdge ? (
@@ -781,26 +802,11 @@ export function AgentEditorPage(props: {
             <button className="asBtn asPaletteBtn type-input" onClick={() => addNode("input")}>
               + Input
             </button>
-            <button className="asBtn asPaletteBtn type-llm" onClick={() => addNode("llm")}>
-              + LLM
-            </button>
-            <button className="asBtn asPaletteBtn type-code_editor" onClick={() => addNode("code_editor")}>
-              + Code editor
+            <button className="asBtn asPaletteBtn type-agent" onClick={() => addNode("agent")}>
+              + Agent
             </button>
             <button className="asBtn asPaletteBtn type-tool" onClick={() => addNode("tool")}>
               + Tool
-            </button>
-            <button className="asBtn asPaletteBtn type-guardrail" onClick={() => addNode("guardrail")}>
-              + Guardrail
-            </button>
-            <button className="asBtn asPaletteBtn type-router" onClick={() => addNode("router")}>
-              + Router
-            </button>
-            <button className="asBtn asPaletteBtn type-handoff" onClick={() => addNode("handoff")}>
-              + Handoff
-            </button>
-            <button className="asBtn asPaletteBtn type-subagent" onClick={() => addNode("subagent")}>
-              + Subagent
             </button>
             <button className="asBtn asPaletteBtn type-output" onClick={() => addNode("output")}>
               + Output
@@ -927,31 +933,36 @@ export function AgentEditorPage(props: {
       <div className="asCard asEditorWide">
         <div className="asCardHeader">
           <div className="asCardTitle">Recent test runs</div>
-          {selectedRevId ? <div className="asMuted asSmall">Revision {selectedRevId.slice(0, 8)}</div> : null}
         </div>
         <div className="asCardBody">
-          {!selectedRevId ? (
-            <div className="asMuted">Save or select a revision to track test runs.</div>
-          ) : testRunHistory.length === 0 ? (
-            <div className="asMuted">No test runs yet for this revision.</div>
+          {testRunHistory.length === 0 ? (
+            <div className="asMuted">No test runs yet.</div>
           ) : (
             <div className="asTable asRecentRunsTable">
               <div className="asTableHead">
                 <div>Run</div>
                 <div>Started</div>
                 <div>Input</div>
-                <div></div>
+                <div>Output</div>
               </div>
               {testRunHistory.map((entry) => (
-                <div key={entry.id} className="asTableRow">
+                <div
+                  key={entry.id}
+                  className="asTableRow clickable"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => recallTestRun(entry)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      recallTestRun(entry);
+                    }
+                  }}
+                >
                   <div className="asMono">{entry.id.slice(0, 8)}</div>
-                  <div>{formatDateTime(entry.created_at)}</div>
-                  <div className="asMuted">{formatInputPreview(entry.inputs_json)}</div>
-                  <div>
-                    <button className="asLink" onClick={() => recallTestRun(entry)}>
-                      Recall
-                    </button>
-                  </div>
+                  <div>{formatDateTime(entry.started_at)}</div>
+                  <div>{formatInputPreview(entry.inputs_json)}</div>
+                  <div>{entry.final_output ? entry.final_output : "—"}</div>
                 </div>
               ))}
             </div>
@@ -963,7 +974,7 @@ export function AgentEditorPage(props: {
         <div className="asEditorFooterGrid">
           <div className="asCard">
             <div className="asCardHeader">
-              <div className="asCardTitle">Test agent</div>
+              <div className="asCardTitle">Trigger test run</div>
             </div>
             <div className="asCardBody asStack">
               <label className="asField">
@@ -1002,7 +1013,7 @@ export function AgentEditorPage(props: {
             mode={testTraceMode}
             emptyMessage="Run a test to stream events here."
             waitingMessage="Waiting for events…"
-            title="Test trace"
+            title="Trace"
           />
         </div>
       </div>
@@ -1047,24 +1058,36 @@ export function AgentEditorPage(props: {
 }
 
 function NodeInspector(props: {
-  node: AgentNode;
+  node: AgentGraphNode;
   issues: ValidationIssue[];
-  onChange: (node: AgentNode) => void;
+  onChange: (node: AgentGraphNode) => void;
   onDelete: (nodeId: string) => void;
-  revisions: AgentRevisionResponse[] | null;
-  currentAgentName: string;
   settings: AppSettings;
 }) {
-  const { node, issues, onChange, onDelete, revisions, currentAgentName, settings } = props;
+  const { node, issues, onChange, onDelete, settings } = props;
   const workspacePickerRef = useRef<HTMLInputElement | null>(null);
   const [schemaText, setSchemaText] = useState(() =>
     node.type === "tool" ? prettyJson(node.schema ?? {}) : "{}",
   );
-  const isModelNode = node.type === "llm" || node.type === "code_editor";
+  const isModelNode = node.type === "agent";
+  const [inputGuardrailsText, setInputGuardrailsText] = useState(() =>
+    node.type === "agent" ? prettyJson(node.input_guardrails ?? []) : "[]",
+  );
+  const [outputGuardrailsText, setOutputGuardrailsText] = useState(() =>
+    node.type === "agent" ? prettyJson(node.output_guardrails ?? []) : "[]",
+  );
+  const [outputTypeText, setOutputTypeText] = useState(() =>
+    node.type === "agent" ? prettyJson(node.output_type ?? {}) : "{}",
+  );
 
   useEffect(() => {
     if (node.type === "tool") {
       setSchemaText(prettyJson(node.schema ?? {}));
+    }
+    if (node.type === "agent") {
+      setInputGuardrailsText(prettyJson(node.input_guardrails ?? []));
+      setOutputGuardrailsText(prettyJson(node.output_guardrails ?? []));
+      setOutputTypeText(prettyJson(node.output_type ?? {}));
     }
   }, [node]);
 
@@ -1073,24 +1096,6 @@ function NodeInspector(props: {
     workspacePickerRef.current.setAttribute("webkitdirectory", "");
     workspacePickerRef.current.setAttribute("directory", "");
   }, []);
-
-  const revisionsByAgent = useMemo(() => {
-    const map = new Map<string, AgentRevisionResponse[]>();
-    for (const rev of revisions ?? []) {
-      if (rev.name === currentAgentName) continue;
-      const list = map.get(rev.name) ?? [];
-      list.push(rev);
-      map.set(rev.name, list);
-    }
-    for (const [key, list] of map.entries()) {
-      list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-      map.set(key, list);
-    }
-    return map;
-  }, [revisions, currentAgentName]);
-  const agentNames = useMemo(() => Array.from(revisionsByAgent.keys()).sort(), [revisionsByAgent]);
-  const selectedAgentRevisions =
-    node.type === "subagent" && node.agent_name ? revisionsByAgent.get(node.agent_name) ?? [] : [];
 
   const modelProvider = useMemo<LlmProvider>(() => {
     if (!isModelNode) return settings.llmProvider;
@@ -1129,18 +1134,7 @@ function NodeInspector(props: {
     updateModelNode({ model: nextModel });
   }
 
-  useEffect(() => {
-    if (node.type !== "subagent") return;
-    if (!node.agent_name) return;
-    const list = revisionsByAgent.get(node.agent_name) ?? [];
-    if (list.length === 0) return;
-    const hasSelected = node.agent_revision_id && list.some((rev) => rev.id === node.agent_revision_id);
-    if (!hasSelected) {
-      onChange({ ...node, agent_revision_id: list[0].id });
-    }
-  }, [node, onChange, revisionsByAgent]);
-
-  function updateModelNode(next: Partial<LLMNode | CodeEditorNode>) {
+  function updateModelNode(next: Partial<AgentNode>) {
     if (!isModelNode) return;
     onChange({ ...node, ...next });
   }
@@ -1179,47 +1173,41 @@ function NodeInspector(props: {
 
       {isModelNode ? (
         <>
-          {node.type === "code_editor" ? (
-            <label className="asField">
-              <div className="asFieldLabel">Workspace root</div>
-              <div className="asRow">
-                <input
-                  className="asInput"
-                  placeholder="Select a folder or enter a path"
-                  value={node.workspace_root ?? ""}
-                  onChange={(e) => updateModelNode({ workspace_root: e.currentTarget.value })}
-                />
-                <button
-                  className="asBtn"
-                  type="button"
-                  onClick={() => workspacePickerRef.current?.click()}
-                >
-                  Choose folder
-                </button>
-              </div>
-              <input
-                ref={workspacePickerRef}
-                type="file"
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  const file = e.currentTarget.files?.[0] as (File & { path?: string }) | undefined;
-                  const rawPath = file?.path ?? "";
-                  const trimmed = rawPath.replace(/[\\/][^\\/]+$/, "");
-                  if (trimmed) {
-                    updateModelNode({ workspace_root: trimmed });
-                  }
-                  e.currentTarget.value = "";
-                }}
-              />
-            </label>
-          ) : null}
           <label className="asField">
-            <div className="asFieldLabel">System prompt</div>
+            <div className="asFieldLabel">Workspace root (optional)</div>
+            <div className="asRow">
+              <input
+                className="asInput"
+                placeholder="Select a folder or enter a path"
+                value={node.workspace_root ?? ""}
+                onChange={(e) => updateModelNode({ workspace_root: e.currentTarget.value })}
+              />
+              <button className="asBtn" type="button" onClick={() => workspacePickerRef.current?.click()}>
+                Choose folder
+              </button>
+            </div>
+            <input
+              ref={workspacePickerRef}
+              type="file"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.currentTarget.files?.[0] as (File & { path?: string }) | undefined;
+                const rawPath = file?.path ?? "";
+                const trimmed = rawPath.replace(/[\\/][^\\/]+$/, "");
+                if (trimmed) {
+                  updateModelNode({ workspace_root: trimmed });
+                }
+                e.currentTarget.value = "";
+              }}
+            />
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Instructions</div>
             <textarea
               className="asTextarea"
               rows={6}
-              value={node.system_prompt ?? ""}
-              onChange={(e) => updateModelNode({ system_prompt: e.currentTarget.value })}
+              value={node.instructions ?? ""}
+              onChange={(e) => updateModelNode({ instructions: e.currentTarget.value })}
             />
           </label>
           <label className="asField">
@@ -1267,6 +1255,51 @@ function NodeInspector(props: {
               onChange={(e) => updateModelNode({ temperature: Number(e.currentTarget.value) })}
             />
           </label>
+          <label className="asField">
+            <div className="asFieldLabel">Input guardrails (JSON)</div>
+            <textarea
+              className="asTextarea"
+              rows={4}
+              value={inputGuardrailsText}
+              onChange={(e) => setInputGuardrailsText(e.currentTarget.value)}
+              onBlur={() => {
+                const parsed = tryParseJsonValue(inputGuardrailsText);
+                if (parsed.ok && Array.isArray(parsed.value)) {
+                  updateModelNode({ input_guardrails: parsed.value as AgentNode["input_guardrails"] });
+                }
+              }}
+            />
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Output guardrails (JSON)</div>
+            <textarea
+              className="asTextarea"
+              rows={4}
+              value={outputGuardrailsText}
+              onChange={(e) => setOutputGuardrailsText(e.currentTarget.value)}
+              onBlur={() => {
+                const parsed = tryParseJsonValue(outputGuardrailsText);
+                if (parsed.ok && Array.isArray(parsed.value)) {
+                  updateModelNode({ output_guardrails: parsed.value as AgentNode["output_guardrails"] });
+                }
+              }}
+            />
+          </label>
+          <label className="asField">
+            <div className="asFieldLabel">Output schema (JSON)</div>
+            <textarea
+              className="asTextarea"
+              rows={4}
+              value={outputTypeText}
+              onChange={(e) => setOutputTypeText(e.currentTarget.value)}
+              onBlur={() => {
+                const parsed = tryParseJsonValue(outputTypeText);
+                if (parsed.ok && parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)) {
+                  updateModelNode({ output_type: parsed.value as Record<string, unknown> });
+                }
+              }}
+            />
+          </label>
         </>
       ) : null}
 
@@ -1298,76 +1331,6 @@ function NodeInspector(props: {
                 if (parsed.ok) updateTool({ schema: parsed.value });
               }}
             />
-          </label>
-        </>
-      ) : null}
-
-      {node.type === "guardrail" ? (
-        <label className="asField">
-          <div className="asFieldLabel">Rule</div>
-          <textarea className="asTextarea" rows={4} value={node.rule ?? ""} onChange={(e) => onChange({ ...node, rule: e.currentTarget.value })} />
-        </label>
-      ) : null}
-
-      {node.type === "router" ? (
-        <label className="asField">
-          <div className="asFieldLabel">Strategy</div>
-          <input className="asInput" value={node.strategy ?? ""} onChange={(e) => onChange({ ...node, strategy: e.currentTarget.value })} />
-        </label>
-      ) : null}
-
-      {node.type === "handoff" ? (
-        <label className="asField">
-          <div className="asFieldLabel">Target agent ID</div>
-          <input className="asInput" value={node.target_agent_id} onChange={(e) => onChange({ ...node, target_agent_id: e.currentTarget.value })} />
-        </label>
-      ) : null}
-
-      {node.type === "subagent" ? (
-        <>
-          <label className="asField">
-            <div className="asFieldLabel">Agent name</div>
-            <select
-              className="asSelect"
-              value={node.agent_name}
-              onChange={(e) => {
-                const nextAgent = e.currentTarget.value;
-                const nextRevs = revisionsByAgent.get(nextAgent) ?? [];
-                onChange({ ...node, agent_name: nextAgent, agent_revision_id: nextRevs[0]?.id ?? "" });
-              }}
-            >
-              <option value="">Select agent…</option>
-              {node.agent_name &&
-              node.agent_name !== currentAgentName &&
-              !(revisions ?? []).some((rev) => rev.name === node.agent_name) ? (
-                <option value={node.agent_name}>{node.agent_name}</option>
-              ) : null}
-              {agentNames.map((agent) => (
-                <option key={agent} value={agent}>
-                  {agent}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">Agent version</div>
-            <select
-              className="asSelect"
-              value={node.agent_revision_id ?? ""}
-              onChange={(e) => onChange({ ...node, agent_revision_id: e.currentTarget.value })}
-              disabled={!node.agent_name || selectedAgentRevisions.length === 0}
-            >
-              <option value="">Latest revision</option>
-              {selectedAgentRevisions.map((rev) => (
-                <option key={rev.id} value={rev.id}>
-                  {formatRelativeTime(rev.created_at)} · {rev.id.slice(0, 8)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="asField">
-            <div className="asFieldLabel">System prompt</div>
-            <textarea className="asTextarea" rows={4} value={node.system_prompt ?? ""} onChange={(e) => onChange({ ...node, system_prompt: e.currentTarget.value })} />
           </label>
         </>
       ) : null}

@@ -14,7 +14,6 @@ export function TraceViewer(props: {
   waitingMessage: string;
   title: string;
 }) {
-  const [traceStatus, setTraceStatus] = useState<"idle" | "connecting" | "connected" | "error">("idle");
   const [traceErr, setTraceErr] = useState<string | null>(null);
   const [traceEvents, setTraceEvents] = useState<RunEventResponse[]>([]);
   const esRef = useRef<EventSource | null>(null);
@@ -28,24 +27,20 @@ export function TraceViewer(props: {
     let cancelled = false;
 
     async function loadStatic(runId: string) {
-      setTraceStatus("connecting");
       setTraceErr(null);
       setTraceEvents([]);
       try {
         const events = await api(props.backend).listRunEvents(runId, 500, 0);
         if (cancelled) return;
         setTraceEvents(events);
-        setTraceStatus("connected");
       } catch (e) {
         if (cancelled) return;
-        setTraceStatus("error");
         setTraceErr(e instanceof Error ? e.message : String(e));
       }
     }
 
     function connectStream(runId: string) {
       disconnectTrace();
-      setTraceStatus("connecting");
       setTraceErr(null);
       setTraceEvents([]);
       const url = `${props.backend.baseUrl}/v1/runs/${encodeURIComponent(runId)}/events/stream`;
@@ -64,22 +59,18 @@ export function TraceViewer(props: {
             }
             return [...prev, data].slice(-2000);
           });
-          setTraceStatus("connected");
         } catch (e) {
-          setTraceStatus("error");
           setTraceErr(e instanceof Error ? e.message : String(e));
         }
       });
 
       es.onerror = () => {
-        setTraceStatus("error");
         setTraceErr("SSE connection error (backend down, CORS blocked, or run_id not found).");
       };
     }
 
     if (!props.runId) {
       disconnectTrace();
-      setTraceStatus("idle");
       setTraceErr(null);
       setTraceEvents([]);
       return () => {
@@ -104,9 +95,6 @@ export function TraceViewer(props: {
     <section className="asCard">
       <header className="asCardHeader">
         <div className="asCardTitle">{props.title}</div>
-        <div className="asCardRight">
-          <span className={`asStatusPill ${traceStatus}`}>{traceStatus}</span>
-        </div>
       </header>
       <div className="asCardBody">
         {traceErr ? <div className="asError">{traceErr}</div> : null}

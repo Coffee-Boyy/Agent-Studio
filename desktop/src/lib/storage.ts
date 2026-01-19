@@ -20,8 +20,9 @@ const EDITOR_DRAFT_KEY = "agent_studio.editor_draft.v1";
 
 export type TestRunEntry = {
   id: string;
-  created_at: string;
+  started_at: string;
   inputs_json: Record<string, unknown>;
+  final_output: string | null;
 };
 
 export function loadSettings(): AppSettings {

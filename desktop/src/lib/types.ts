@@ -96,21 +96,24 @@ export type OutputNode = NodeBase & {
   type: "output";
 };
 
-export type LLMNode = NodeBase & {
-  type: "llm";
-  system_prompt?: string;
-  model?: Record<string, unknown>;
-  tools?: string[];
-  temperature?: number | null;
+export type GuardrailSpec = {
+  name: string;
+  rule: string;
+  blocking?: boolean;
+  description?: string | null;
 };
 
-export type CodeEditorNode = NodeBase & {
-  type: "code_editor";
-  system_prompt?: string;
+export type AgentNode = NodeBase & {
+  type: "agent";
+  instructions?: string;
   model?: Record<string, unknown>;
   tools?: string[];
   temperature?: number | null;
+  input_guardrails?: GuardrailSpec[];
+  output_guardrails?: GuardrailSpec[];
+  output_type?: Record<string, unknown> | null;
   workspace_root?: string;
+  sandbox_tools?: boolean;
 };
 
 export type ToolNode = NodeBase & {
@@ -122,42 +125,11 @@ export type ToolNode = NodeBase & {
   description?: string | null;
 };
 
-export type GuardrailNode = NodeBase & {
-  type: "guardrail";
-  rule?: string;
-};
-
-export type RouterNode = NodeBase & {
-  type: "router";
-  strategy?: string;
-};
-
-export type HandoffNode = NodeBase & {
-  type: "handoff";
-  target_agent_id: string;
-};
-
-export type SubAgentNode = NodeBase & {
-  type: "subagent";
-  agent_name: string;
-  agent_revision_id?: string;
-  system_prompt?: string;
-};
-
-export type AgentNode =
-  | InputNode
-  | OutputNode
-  | LLMNode
-  | CodeEditorNode
-  | ToolNode
-  | GuardrailNode
-  | RouterNode
-  | HandoffNode
-  | SubAgentNode;
+export type AgentGraphNode = InputNode | OutputNode | AgentNode | ToolNode;
 
 export type AgentGraphDocV1 = {
   schema_version: "graph-v1";
-  nodes: AgentNode[];
+  nodes: AgentGraphNode[];
   edges: GraphEdge[];
   viewport: GraphViewport;
   metadata: Record<string, unknown>;

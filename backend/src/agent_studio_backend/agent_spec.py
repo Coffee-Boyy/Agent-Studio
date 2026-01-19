@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
-
-class GraphPosition(BaseModel):
-    x: float
-    y: float
+from agent_studio_backend.nodes.base import NodeBase
+from agent_studio_backend.nodes.agent import AgentNode as AgentNodeModel
+from agent_studio_backend.nodes.input import InputNode
+from agent_studio_backend.nodes.output import OutputNode
+from agent_studio_backend.nodes.tool import ToolNode
+from agent_studio_backend.validation import ValidationIssue
 
 
 class GraphViewport(BaseModel):
@@ -25,85 +27,11 @@ class GraphEdge(BaseModel):
     target_handle: Optional[str] = None
 
 
-class NodeBase(BaseModel):
-    model_config = ConfigDict(extra="allow", populate_by_name=True)
-
-    id: str
-    type: str
-    name: Optional[str] = None
-    position: GraphPosition
-
-
-class InputNode(NodeBase):
-    type: Literal["input"]
-    # Use `schema_` to avoid colliding with Pydantic's BaseModel.schema() API.
-    # Keep JSON compatibility by aliasing to "schema".
-    schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")
-
-
-class OutputNode(NodeBase):
-    type: Literal["output"]
-
-
-class LLMNode(NodeBase):
-    type: Literal["llm"]
-    system_prompt: str = ""
-    model: dict[str, Any] = Field(default_factory=dict)
-    tools: list[str] = Field(default_factory=list)
-    temperature: Optional[float] = None
-
-
-class CodeEditorNode(NodeBase):
-    type: Literal["code_editor"]
-    system_prompt: str = ""
-    model: dict[str, Any] = Field(default_factory=dict)
-    tools: list[str] = Field(default_factory=list)
-    temperature: Optional[float] = None
-    workspace_root: Optional[str] = None
-
-
-class ToolNode(NodeBase):
-    type: Literal["tool"]
-    tool_name: str
-    language: str = "python"
-    code: str = ""
-    # Use `schema_` to avoid colliding with Pydantic's BaseModel.schema() API.
-    # Keep JSON compatibility by aliasing to "schema".
-    schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")
-    description: Optional[str] = None
-
-
-class GuardrailNode(NodeBase):
-    type: Literal["guardrail"]
-    rule: str = ""
-
-
-class RouterNode(NodeBase):
-    type: Literal["router"]
-    strategy: str = "first"
-
-
-class HandoffNode(NodeBase):
-    type: Literal["handoff"]
-    target_agent_id: str
-
-
-class SubAgentNode(NodeBase):
-    type: Literal["subagent"]
-    agent_name: str
-    system_prompt: str = ""
-
-
 AgentNode = Union[
     InputNode,
     OutputNode,
-    LLMNode,
-    CodeEditorNode,
+    AgentNodeModel,
     ToolNode,
-    GuardrailNode,
-    RouterNode,
-    HandoffNode,
-    SubAgentNode,
 ]
 
 
@@ -122,8 +50,3 @@ class AgentSpecEnvelope(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class ValidationIssue(BaseModel):
-    code: str
-    message: str
-    node_id: Optional[str] = None
-    edge_id: Optional[str] = None
