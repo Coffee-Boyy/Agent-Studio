@@ -251,7 +251,6 @@ function toFlowNodes(graph: AgentGraphDocV1, issuesByNodeId: Map<string, Validat
       ...base,
       type: "agentNode",
       parentId,
-      extent: parentId ? ("parent" as const) : undefined,
     } as Node;
   });
   return nodes.sort(sortNodesForReactFlow);
@@ -650,13 +649,36 @@ export function AgentEditorPage(props: {
   }, []);
 
   const onNodeDragStop: OnNodeDrag = useCallback((_, dragged) => {
-    if (dragged.type === "group") return;
+    // For groups, just sync their position to the graph (no reparenting logic)
+    if (dragged.type === "group") {
+      setGraph((g) => ({
+        ...g,
+        nodes: g.nodes.map((n) =>
+          n.id === dragged.id ? { ...n, position: dragged.position } : n
+        ),
+      }));
+      return;
+    }
+
     setFlowNodes((prev) => {
       const current = prev.find((n) => n.id === dragged.id);
       if (!current) return prev;
 
       const loopGroupNodes = prev.filter((n) => n.type === "group");
-      if (loopGroupNodes.length === 0) return prev;
+      if (loopGroupNodes.length === 0) {
+        // No groups, but still sync all positions to the graph to prevent position drift
+        setGraph((g) => ({
+          ...g,
+          nodes: g.nodes.map((n) => {
+            const flowNode = prev.find((fn) => fn.id === n.id);
+            if (flowNode) {
+              return { ...n, position: flowNode.position };
+            }
+            return n;
+          }),
+        }));
+        return prev;
+      }
 
       const prevParentId = typeof current.parentId === "string" ? current.parentId : undefined;
 
@@ -702,12 +724,13 @@ export function AgentEditorPage(props: {
           return aArea - bArea;
         })[0]?.id;
 
-      // No change in parent, no position adjustment needed
-      if (nextParentId === prevParentId) return prev;
-
-      // Calculate the new position based on the new parent
+      // Calculate the new position based on the new parent (even if parent didn't change,
+      // we need to sync positions to the graph)
       let newPosition: { x: number; y: number };
-      if (nextParentId) {
+      if (nextParentId === prevParentId) {
+        // No change in parent - use the dragged position as-is
+        newPosition = dragged.position;
+      } else if (nextParentId) {
         // Node is being parented to a group: convert absolute to relative position
         const newParent = prev.find((n) => n.id === nextParentId);
         if (newParent) {
@@ -727,6 +750,25 @@ export function AgentEditorPage(props: {
         newPosition = absolutePosition;
       }
 
+      // If parent didn't change, just sync all positions to the graph
+      if (nextParentId === prevParentId) {
+        setGraph((g) => ({
+          ...g,
+          nodes: g.nodes.map((n) => {
+            if (n.id === current.id) {
+              return { ...n, position: newPosition };
+            }
+            // Sync other node positions from flow state to prevent position drift
+            const flowNode = prev.find((fn) => fn.id === n.id);
+            if (flowNode) {
+              return { ...n, position: flowNode.position };
+            }
+            return n;
+          }),
+        }));
+        return prev;
+      }
+
       const next = prev
         .map((n) => {
           if (n.id !== current.id) return n;
@@ -739,12 +781,21 @@ export function AgentEditorPage(props: {
         })
         .sort(sortNodesForReactFlow);
 
-      // Update the graph state with new parent_id and position
+      // Update the graph state with new parent_id and position for the dragged node,
+      // AND sync positions for all other nodes to prevent position drift
       setGraph((g) => ({
         ...g,
-        nodes: g.nodes.map((n) =>
-          n.id === current.id ? { ...n, parent_id: nextParentId, position: newPosition } : n
-        ),
+        nodes: g.nodes.map((n) => {
+          if (n.id === current.id) {
+            return { ...n, parent_id: nextParentId, position: newPosition };
+          }
+          // Sync other node positions from flow state
+          const flowNode = prev.find((fn) => fn.id === n.id);
+          if (flowNode) {
+            return { ...n, position: flowNode.position };
+          }
+          return n;
+        }),
       }));
 
       return next;
@@ -1263,8 +1314,8 @@ export function AgentEditorPage(props: {
                         }
                       }}
                     >
-                      <span className="asCanvasErrorSep"> • </span>
-                      <span className="asMono">{issue.code}</span> {issue.message}
+                      <span className="asCanvasErrorSep">{idx + 1}. </span>
+                      <span className="asMono asCodeBlock">{issue.code}</span> {issue.message}
                     </button>
                   ))
                 : null}
